@@ -8,10 +8,8 @@ from langchain_core.messages import HumanMessage
 
 # Low-cost models only (cheapest first)
 CHAT_MODELS_TO_TRY = [
-    "gemini-2.0-flash-lite",   # cheapest — $0.075/1M input tokens
-    "gemini-2.0-flash",        # standard — $0.10/1M input tokens
+    "gemini-3.1-flash-lite",
 ]
-
 
 def test_chat():
     print("\n[1] Chat:")
@@ -19,8 +17,9 @@ def test_chat():
         try:
             llm = get_llm(model)
             response = llm.invoke([HumanMessage(content="Say hello in one sentence.")])
+            from src.utils import extract_text
             print(f"    PASSED  {model}")
-            print(f"    Response: {response.content.strip()}")
+            print(f"    Response: {extract_text(response.content).strip()}")
             return model
         except Exception as e:
             msg = str(e)

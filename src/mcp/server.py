@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from src.mcp.tools import search_flights, search_hotels, search_transit
+from src.tools import search_flights, search_hotels, search_transit
 
 mcp = FastMCP("travel-planning")
 
