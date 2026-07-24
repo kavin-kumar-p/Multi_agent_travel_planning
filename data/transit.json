@@ -1,0 +1,59 @@
+[
+  {
+    "destination": "Paris, France",
+    "airport_transfer": {
+      "mode": "RER B train",
+      "cost_usd": 12,
+      "duration_minutes": 45
+    },
+    "daily_pass": {
+      "name": "Paris Visite",
+      "cost_usd": 14,
+      "coverage": "Metro, RER, Bus within Paris zones 1-3"
+    },
+    "tips": [
+      "Buy a Navigo Easy card for pay-as-you-go metro rides",
+      "Avoid taxis from CDG — 3x more expensive than RER B",
+      "Metro runs until 1am on weekdays, 2am on weekends",
+      "Vélib' bike-share great for short trips between attractions"
+    ]
+  },
+  {
+    "destination": "Tokyo, Japan",
+    "airport_transfer": {
+      "mode": "Narita Express (N'EX)",
+      "cost_usd": 28,
+      "duration_minutes": 60
+    },
+    "daily_pass": {
+      "name": "Suica Card (IC card)",
+      "cost_usd": 5,
+      "coverage": "JR lines, Tokyo Metro, most buses"
+    },
+    "tips": [
+      "JR Pass worth it if doing 2+ day trips (Nikko, Kamakura, Kyoto)",
+      "Suica/Pasmo IC cards accepted at convenience stores too",
+      "Avoid taxis — expensive and often stuck in traffic",
+      "24-hour Tokyo Metro pass ($6) great for metro-heavy days"
+    ]
+  },
+  {
+    "destination": "New York, USA",
+    "airport_transfer": {
+      "mode": "AirTrain JFK + Subway",
+      "cost_usd": 10,
+      "duration_minutes": 60
+    },
+    "daily_pass": {
+      "name": "OMNY 7-day Unlimited",
+      "cost_usd": 34,
+      "coverage": "All NYC subway lines and local buses"
+    },
+    "tips": [
+      "Subway runs 24/7 — most reliable city option",
+      "Tap OMNY with contactless card or phone at turnstiles",
+      "Avoid taxis/rideshare from JFK during peak hours",
+      "CitiBike (bike-share) good for Brooklyn Bridge and waterfront"
+    ]
+  }
+]

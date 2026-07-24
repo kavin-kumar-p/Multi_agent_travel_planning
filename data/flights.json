@@ -1,0 +1,82 @@
+[
+  {
+    "flight_id": "F1",
+    "origin": "JFK",
+    "destination": "CDG",
+    "airline": "Air France",
+    "class": "economy",
+    "price": 620,
+    "layovers": 0,
+    "duration_hours": 7.5
+  },
+  {
+    "flight_id": "F2",
+    "origin": "JFK",
+    "destination": "CDG",
+    "airline": "Delta",
+    "class": "business",
+    "price": 2100,
+    "layovers": 0,
+    "duration_hours": 7.5
+  },
+  {
+    "flight_id": "F3",
+    "origin": "JFK",
+    "destination": "CDG",
+    "airline": "United",
+    "class": "economy",
+    "price": 540,
+    "layovers": 1,
+    "duration_hours": 11.0
+  },
+  {
+    "flight_id": "F4",
+    "origin": "LAX",
+    "destination": "NRT",
+    "airline": "JAL",
+    "class": "economy",
+    "price": 890,
+    "layovers": 0,
+    "duration_hours": 11.5
+  },
+  {
+    "flight_id": "F5",
+    "origin": "LAX",
+    "destination": "NRT",
+    "airline": "ANA",
+    "class": "economy",
+    "price": 820,
+    "layovers": 1,
+    "duration_hours": 14.0
+  },
+  {
+    "flight_id": "F6",
+    "origin": "JFK",
+    "destination": "JFK",
+    "airline": "JetBlue",
+    "class": "economy",
+    "price": 280,
+    "layovers": 0,
+    "duration_hours": 5.5
+  },
+  {
+    "flight_id": "F7",
+    "origin": "ORD",
+    "destination": "CDG",
+    "airline": "American",
+    "class": "economy",
+    "price": 580,
+    "layovers": 1,
+    "duration_hours": 10.0
+  },
+  {
+    "flight_id": "F8",
+    "origin": "SFO",
+    "destination": "NRT",
+    "airline": "United",
+    "class": "economy",
+    "price": 760,
+    "layovers": 0,
+    "duration_hours": 10.5
+  }
+]

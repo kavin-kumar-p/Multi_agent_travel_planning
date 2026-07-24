@@ -1,0 +1,74 @@
+[
+  {
+    "id": "ITIN-001",
+    "destination": "Paris, France",
+    "dates": "2025-04-10 to 2025-04-15",
+    "nights": 5,
+    "budget": 2500,
+    "total_spent": 2180,
+    "traveler_profile": "PREF-002",
+    "breakdown": {
+      "flights": 620,
+      "hotel": 900,
+      "transport": 120,
+      "attractions": 200,
+      "meals": 340
+    },
+    "highlights": [
+      "Louvre Museum — skip-the-line tickets essential",
+      "Seine River dinner cruise",
+      "Day trip to Versailles (book in advance)",
+      "Montmartre walking tour at sunset"
+    ],
+    "rating": 4.8,
+    "notes": "Le Marais hotel ideal for walking to major sites. RER B from CDG is the best airport connection. Avoid taxis from CDG — significantly more expensive."
+  },
+  {
+    "id": "ITIN-002",
+    "destination": "Tokyo, Japan",
+    "dates": "2025-10-01 to 2025-10-07",
+    "nights": 6,
+    "budget": 3500,
+    "total_spent": 3210,
+    "traveler_profile": "PREF-001",
+    "breakdown": {
+      "flights": 980,
+      "hotel": 1050,
+      "transport": 180,
+      "attractions": 450,
+      "meals": 550
+    },
+    "highlights": [
+      "teamLab Borderless — book 3+ weeks ahead",
+      "Tsukiji outer market breakfast (5:30am)",
+      "Day trip to Nikko via JR Pass",
+      "Shibuya crossing at peak hour"
+    ],
+    "rating": 4.9,
+    "notes": "JR Pass saves money on day trips. Book teamLab well in advance. Suica card covers all local transit. Asakusa area great for traditional experience."
+  },
+  {
+    "id": "ITIN-003",
+    "destination": "New York, USA",
+    "dates": "2025-06-15 to 2025-06-20",
+    "nights": 5,
+    "budget": 3000,
+    "total_spent": 2780,
+    "traveler_profile": "PREF-003",
+    "breakdown": {
+      "flights": 320,
+      "hotel": 1100,
+      "transport": 80,
+      "attractions": 350,
+      "meals": 930
+    },
+    "highlights": [
+      "Metropolitan Museum of Art — full day",
+      "High Line walk + Chelsea Market lunch",
+      "Brooklyn Bridge walk at dawn",
+      "Staten Island Ferry for Statue of Liberty views (free)"
+    ],
+    "rating": 4.6,
+    "notes": "OMNY 7-day pass covers all subway and buses. Museum Mile on Fridays often has free/reduced entry. Book popular restaurants 2 weeks ahead."
+  }
+]

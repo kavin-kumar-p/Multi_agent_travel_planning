@@ -1,0 +1,62 @@
+[
+  {
+    "id": "HTL-001",
+    "name": "Hotel Le Marais",
+    "destination": "Paris, France",
+    "stars": 4,
+    "price_per_night": 180,
+    "location": "Le Marais district, central Paris",
+    "distance_to_center_km": 1.2,
+    "amenities": ["WiFi", "Breakfast included", "Gym", "Concierge", "Airport shuttle"],
+    "cancellation_policy": "Free cancellation up to 48 hours before check-in",
+    "tags": ["central", "boutique", "breakfast-included"]
+  },
+  {
+    "id": "HTL-002",
+    "name": "Budget Inn Belleville",
+    "destination": "Paris, France",
+    "stars": 3,
+    "price_per_night": 95,
+    "location": "Belleville, Paris",
+    "distance_to_center_km": 4.1,
+    "amenities": ["WiFi", "24h reception"],
+    "cancellation_policy": "Non-refundable",
+    "tags": ["budget", "basic"]
+  },
+  {
+    "id": "HTL-003",
+    "name": "Shinjuku Grand Hotel",
+    "destination": "Tokyo, Japan",
+    "stars": 4,
+    "price_per_night": 150,
+    "location": "Shinjuku, Tokyo",
+    "distance_to_center_km": 2.5,
+    "amenities": ["WiFi", "Restaurant", "Business center", "Onsen", "Airport bus"],
+    "cancellation_policy": "Free cancellation up to 72 hours before check-in",
+    "tags": ["business", "onsen", "transport-hub"]
+  },
+  {
+    "id": "HTL-004",
+    "name": "Asakusa Ryokan",
+    "destination": "Tokyo, Japan",
+    "stars": 3,
+    "price_per_night": 110,
+    "location": "Asakusa, Tokyo",
+    "distance_to_center_km": 3.8,
+    "amenities": ["WiFi", "Traditional breakfast", "Onsen", "Yukata provided"],
+    "cancellation_policy": "Free cancellation up to 48 hours before check-in",
+    "tags": ["traditional", "cultural", "onsen"]
+  },
+  {
+    "id": "HTL-005",
+    "name": "Midtown Manhattan Suites",
+    "destination": "New York, USA",
+    "stars": 3,
+    "price_per_night": 220,
+    "location": "Midtown Manhattan",
+    "distance_to_center_km": 0.5,
+    "amenities": ["WiFi", "Gym", "Rooftop terrace", "Concierge"],
+    "cancellation_policy": "Free cancellation up to 24 hours before check-in",
+    "tags": ["central", "business", "rooftop"]
+  }
+]

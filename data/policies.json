@@ -1,0 +1,50 @@
+[
+  {
+    "id": "POL-001",
+    "name": "Economy Class Policy",
+    "category": "flights",
+    "description": "All flights must be booked in economy class unless the journey exceeds 8 hours.",
+    "rules": [
+      "Economy class is standard for all routes under 8 hours",
+      "Business class requires manager approval for routes over 8 hours",
+      "Booking must be made at least 7 days in advance when possible",
+      "Refundable tickets preferred when price difference is under $50"
+    ]
+  },
+  {
+    "id": "POL-002",
+    "name": "Hotel Policy",
+    "category": "hotels",
+    "description": "Hotels must be rated 3-4 stars. 5-star requires executive approval.",
+    "rules": [
+      "3 or 4-star hotels are standard",
+      "5-star stays require director-level approval",
+      "Hotel must be within 5 km of primary destination or attraction cluster",
+      "Breakfast inclusion preferred when available at no extra cost"
+    ]
+  },
+  {
+    "id": "POL-003",
+    "name": "Daily Expense Policy",
+    "category": "expenses",
+    "description": "Per diem limits for meals and incidentals by region.",
+    "rules": [
+      "North America: $75/day for meals",
+      "Europe: $90/day for meals",
+      "Asia: $60/day for meals",
+      "Receipts required for all expenses over $25"
+    ]
+  },
+  {
+    "id": "POL-004",
+    "name": "Cancellation Policy",
+    "category": "general",
+    "description": "Cancellation and refund rules for all travel bookings.",
+    "rules": [
+      "Cancel flights 72+ hours before departure for full refund",
+      "Hotels: prefer free cancellation options",
+      "Non-refundable bookings require pre-approval",
+      "Travel insurance mandatory for trips over $2000"
+    ]
+  }
+]

@@ -1,0 +1,71 @@
+[
+  {
+    "id": "DEST-001",
+    "name": "Paris, France",
+    "country": "France",
+    "region": "Europe",
+    "timezone": "CET (UTC+1)",
+    "currency": "EUR",
+    "best_seasons": ["spring", "fall"],
+    "highlights": [
+      "Eiffel Tower",
+      "Louvre Museum",
+      "Notre-Dame Cathedral",
+      "Montmartre",
+      "Palace of Versailles"
+    ],
+    "cuisine": ["French cuisine", "Boulangeries", "Patisseries", "Wine bars"],
+    "transport": {
+      "airport": "Charles de Gaulle (CDG)",
+      "metro": "Extensive metro network — 16 lines, runs until 1am",
+      "airport_to_center": "RER B train — 45 min, $12"
+    },
+    "tags": ["culture", "history", "art", "romance", "food"]
+  },
+  {
+    "id": "DEST-002",
+    "name": "Tokyo, Japan",
+    "country": "Japan",
+    "region": "Asia",
+    "timezone": "JST (UTC+9)",
+    "currency": "JPY",
+    "best_seasons": ["spring", "fall"],
+    "highlights": [
+      "Shibuya Crossing",
+      "Senso-ji Temple",
+      "Akihabara",
+      "Shinjuku Gyoen",
+      "teamLab Borderless"
+    ],
+    "cuisine": ["Ramen", "Sushi", "Tempura", "Izakayas", "Matcha desserts"],
+    "transport": {
+      "airport": "Narita (NRT) / Haneda (HND)",
+      "metro": "JR Pass recommended for day trips; Suica card for local transit",
+      "airport_to_center": "Narita Express — 60 min, $28"
+    },
+    "tags": ["technology", "culture", "anime", "food", "nature"]
+  },
+  {
+    "id": "DEST-003",
+    "name": "New York, USA",
+    "country": "United States",
+    "region": "North America",
+    "timezone": "EST (UTC-5)",
+    "currency": "USD",
+    "best_seasons": ["spring", "fall"],
+    "highlights": [
+      "Central Park",
+      "Times Square",
+      "Statue of Liberty",
+      "Metropolitan Museum of Art",
+      "Brooklyn Bridge"
+    ],
+    "cuisine": ["NY Pizza", "Bagels", "Fine Dining", "Food trucks", "Delis"],
+    "transport": {
+      "airport": "JFK / LaGuardia (LGA) / Newark (EWR)",
+      "metro": "NYC Subway — 24/7, most reliable option",
+      "airport_to_center": "AirTrain + Subway — 60 min, $10"
+    },
+    "tags": ["urban", "culture", "shopping", "food", "entertainment"]
+  }
+]

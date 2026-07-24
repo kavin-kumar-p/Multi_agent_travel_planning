@@ -1,0 +1,38 @@
+[
+  {
+    "profile_id": "PREF-001",
+    "name": "Adventure Traveler",
+    "interests": ["hiking", "outdoor activities", "local culture", "street food"],
+    "accommodation_preference": "budget-friendly, central location",
+    "flight_preference": "cheapest available, flexible with layovers",
+    "dining_style": "local restaurants, street food, avoid tourist traps",
+    "pace": "fast-paced, maximise attractions visited"
+  },
+  {
+    "profile_id": "PREF-002",
+    "name": "Business Traveler",
+    "interests": ["business districts", "networking venues", "fine dining", "efficiency"],
+    "accommodation_preference": "4-star, near business district, reliable WiFi",
+    "flight_preference": "direct flights preferred, economy class, on-time reliability",
+    "dining_style": "business-appropriate restaurants, expense-account friendly",
+    "pace": "structured schedule with some leisure time evenings"
+  },
+  {
+    "profile_id": "PREF-003",
+    "name": "Culture & History Enthusiast",
+    "interests": ["museums", "history", "art galleries", "architecture", "food"],
+    "accommodation_preference": "central, character property, 3-4 star",
+    "flight_preference": "economy, reasonable schedule",
+    "dining_style": "local cuisine, chef-recommended spots, food markets",
+    "pace": "relaxed, spend longer at key sights, not rushing"
+  },
+  {
+    "profile_id": "PREF-004",
+    "name": "Family Vacationer",
+    "interests": ["family attractions", "theme parks", "beaches", "easy dining"],
+    "accommodation_preference": "family rooms or suites, amenities for kids, pool",
+    "flight_preference": "direct flights, child-friendly airlines",
+    "dining_style": "family-friendly restaurants, buffets welcome, early dinner",
+    "pace": "relaxed, prioritise child-friendly activities, afternoon rest"
+  }
+]
