@@ -34,11 +34,12 @@ class AgentCard(BaseModel):
 # ── Task lifecycle ────────────────────────────────────────────────────────────
 
 class TaskStatus(str, Enum):
-    SUBMITTED = "submitted"
-    WORKING   = "working"
-    COMPLETED = "completed"
-    FAILED    = "failed"
-    CANCELED  = "canceled"
+    SUBMITTED      = "submitted"
+    WORKING        = "working"
+    INPUT_REQUIRED = "input_required"   # agent needs more info before completing
+    COMPLETED      = "completed"
+    FAILED         = "failed"
+    CANCELED       = "canceled"
 
 
 # ── Message content parts ─────────────────────────────────────────────────────

@@ -4,11 +4,11 @@ from __future__ import annotations
 import streamlit as st
 
 _AGENT_LABELS = {
-    "flights":      "Flight Agent (LangGraph)",
-    "attractions":  "Attractions Agent (LangGraph)",
-    "hotel":        "Hotel Agent (CrewAI)",
-    "transport":    "Transport Agent (CrewAI)",
-    "coordinator":  "Coordinator (Google ADK)",
+    "flights":      "Flight Agent — LangGraph",
+    "attractions":  "Attractions Agent — LangGraph",
+    "hotel":        "Hotel Agent — CrewAI",
+    "transport":    "Transport Agent — CrewAI",
+    "coordinator":  "Coordinator — Google ADK",
 }
 
 _STATUS_LABELS = {

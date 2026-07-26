@@ -1,9 +1,10 @@
-"""Coordinator — Google A2A protocol orchestration.
+"""Coordinator — Google ADK routing + A2A protocol orchestration.
 
 Architecture:
-  Coordinator (this module)
-  ├── Phase 1: discovers agents via GET /.well-known/agent.json + GET /health
-  └── Phase 2: triggers all needed agents in PARALLEL via POST /send_message
+  Coordinator (this module, powered by Google ADK LlmAgent)
+  ├── Phase 1: ADK LlmAgent reads user query and decides which agents to invoke
+  ├── Phase 2: discovers agents via GET /.well-known/agent.json + GET /health
+  └── Phase 3: triggers all needed agents in PARALLEL via POST /send_message
 
 A2A agent services (all fired simultaneously):
   Flight Agent      http://127.0.0.1:8001  (LangGraph)
@@ -13,8 +14,8 @@ A2A agent services (all fired simultaneously):
 
 Each agent is autonomous — it calls peer agents directly via A2A when it
 needs enrichment data:
-  Attractions → asks Flight      (query_type="date_confirmation")
-  Hotel       → asks Attractions (query_type="cluster_areas")
+  Attractions → asks Flight      (confirmed dates)
+  Hotel       → asks Attractions (cluster areas)
   Transport   → asks Flight + Attractions + Hotel in parallel
 
 The coordinator passes only the original request fields + session_id.
@@ -28,7 +29,11 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from langchain_core.messages import HumanMessage
+from google import genai as google_genai
+from google.adk.agents import LlmAgent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types as genai_types
 
 from src.a2a.client import A2AClient
 from src.a2a.launch import all_agent_urls
@@ -36,7 +41,6 @@ from src.config.constants import DEFAULT_BUDGET_SPLIT, RETRY_CAP_FACTOR
 from src.config.settings import settings
 from src.coordinator.models import TravelRequest
 from src.coordinator.session import TravelSession
-from src.llm.factory import get_llm
 from src.prompts import load_prompt
 from src.utils.coordinator_helpers import (
     assemble,
@@ -61,37 +65,56 @@ def _trace(trace_sink, agent: str, status: str, **extra) -> None:
         trace_sink.append({"agent": agent, "status": status, "ts": _now(), **extra})
 
 
-async def _llm_decide_agents(request: TravelRequest) -> dict[str, bool]:
+async def _llm_decide_agents(request: TravelRequest, agent_cards: str) -> dict[str, bool]:
     """
-    LLM reads the user's original chat query and decides which agents to invoke.
-    Falls back to condition-based needed_agents() if the LLM call fails.
-    Pre-booked items are always forced to False regardless of LLM output.
+    Google ADK LlmAgent reads the discovered AgentCards + user query and decides
+    which agents to invoke. Falls back to running all agents if the ADK call fails.
     """
-    pre_booked = {
-        "flights":   request.confirmed_flight is not None,
-        "hotel":     request.confirmed_hotel is not None,
-        "transport": request.confirmed_transport is not None,
-    }
     _p = load_prompt("coordinator_routing")
-    prompt = (
-        _p["system"] + "\n\n"
-        + _p["user_template"].format(
-            user_query=request.user_query or "Plan my trip",
-            origin=request.origin,
-            destination=request.destination,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            total_budget=f"{request.total_budget:.0f}",
-            interests=", ".join(request.interests) or "general sightseeing",
-            flights_booked=pre_booked["flights"],
-            hotel_booked=pre_booked["hotel"],
-            transport_booked=pre_booked["transport"],
-        )
+    system_instruction = _p["system"]
+    user_message = _p["user_template"].format(
+        agent_cards=agent_cards,
+        user_query=request.user_query or "Plan my trip",
+        origin=request.origin,
+        destination=request.destination,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        total_budget=f"{request.total_budget:.0f}",
+        interests=", ".join(request.interests) or "general sightseeing",
     )
+
     try:
-        llm = get_llm(settings.coordinator_model, temperature=0.0)
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
-        content = response.content.strip()
+        routing_agent = LlmAgent(
+            name="coordinator_router",
+            model=settings.coordinator_model,
+            instruction=system_instruction,
+            generate_content_config=genai_types.GenerateContentConfig(temperature=0.0),
+        )
+        session_service = InMemorySessionService()
+        runner = Runner(
+            agent=routing_agent,
+            session_service=session_service,
+            app_name="coordinator",
+        )
+        session = await session_service.create_session(
+            app_name="coordinator", user_id="system"
+        )
+
+        final_text = ""
+        async for event in runner.run_async(
+            user_id="system",
+            session_id=session.id,
+            new_message=genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=user_message)],
+            ),
+        ):
+            if event.is_final_response() and event.content:
+                for part in (event.content.parts or []):
+                    if hasattr(part, "text") and part.text:
+                        final_text += part.text
+
+        content = final_text.strip()
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -100,25 +123,23 @@ async def _llm_decide_agents(request: TravelRequest) -> dict[str, bool]:
 
         needed = {k: bool(decision.get(k, True))
                   for k in ("flights", "attractions", "hotel", "transport")}
-        # Hard override — pre-booked items are never invoked
-        for k, booked in pre_booked.items():
-            if booked:
-                needed[k] = False
-
-        logger.info("LLM routing: %s | reason: %s", needed, decision.get("reasoning", ""))
+        logger.info("ADK routing: %s | reason: %s", needed, decision.get("reasoning", ""))
         return needed
+
     except Exception as exc:
-        logger.warning("LLM routing failed (%s) — using condition-based fallback", exc)
-        return needed_agents(request)
+        logger.warning("ADK routing failed (%s) — running all agents", exc)
+        return {"flights": True, "attractions": True, "hotel": True, "transport": True}
 
 
-async def _discover_agents() -> dict[str, str]:
+async def _discover_agents() -> tuple[dict[str, str], str]:
     """
     A2A Phase 1 — discover all agents via AgentCard and verify health.
-    Returns a dict of name → url for healthy agents.
+    Returns (healthy_urls, agent_cards_text) where agent_cards_text is
+    formatted card descriptions ready to inject into the routing LLM prompt.
     """
     urls = all_agent_urls()
     healthy: dict[str, str] = {}
+    card_lines: list[str] = []
 
     async def _check(name: str, url: str) -> None:
         client = A2AClient(url)
@@ -129,11 +150,13 @@ async def _discover_agents() -> dict[str, str]:
             logger.info("A2A discovery: %s (%s) — %s", card.name, url, status)
             if ok:
                 healthy[name] = url
+                card_lines.append(f"- {card.name} (key: {name}): {card.description}")
         except Exception as exc:
             logger.warning("A2A discovery failed for '%s' at %s: %s", name, url, exc)
 
     await asyncio.gather(*[_check(n, u) for n, u in urls.items()])
-    return healthy
+    agent_cards_text = "\n".join(card_lines) if card_lines else "No agents discovered."
+    return healthy, agent_cards_text
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -145,13 +168,20 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
     rag_stores is accepted for interface compatibility (agent servers load
     their own RAG stores on startup; coordinator does not need them).
     """
-    issues = validate(request)
-    if issues:
-        logger.warning("Validation failed: %s", issues)
-        return {"status": "incomplete", "missing_fields": issues}
-
     session = TravelSession(total_budget=request.total_budget)
-    needed  = await _llm_decide_agents(request)
+
+    # ── A2A Phase 1: discover agents via AgentCard + health check ─────────────
+    healthy, agent_cards = await _discover_agents()
+    logger.info("Healthy A2A agents: %s", list(healthy))
+
+    # ── A2A Phase 2: LLM reads discovered AgentCards to decide routing ────────
+    needed  = await _llm_decide_agents(request, agent_cards)
+
+    # Re-validate with routing context — origin not required if Flight Agent skipped
+    issues = validate(request, needed)
+    if issues:
+        logger.warning("Validation failed (post-routing): %s", issues)
+        return {"status": "incomplete", "missing_fields": issues}
     budget_split = request.budget_split or DEFAULT_BUDGET_SPLIT
     session.per_agent_caps = split_budget(request.total_budget, needed, budget_split)
     caps    = session.per_agent_caps
@@ -162,31 +192,15 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
         request.total_budget, [k for k, v in needed.items() if v], caps,
     )
 
-    # ── A2A Phase 1: agent discovery + health check ───────────────────────────
-    healthy = await _discover_agents()
-    logger.info("Healthy A2A agents: %s", list(healthy))
-
     def _client(name: str) -> A2AClient:
-        url = all_agent_urls()[name]
+        url = healthy.get(name) or all_agent_urls()[name]
         return A2AClient(url)
 
     session_id = session.session_id
 
-    # ── Pre-populate skipped (pre-booked) agents ──────────────────────────────
-    flight_result: dict | None = None
-    if not needed["flights"]:
-        flight_result = {**request.confirmed_flight, "_skipped": True}
-        _trace(trace_sink, "flights", "skipped")
-
-    hotel_result: dict | None = None
-    if not needed["hotel"]:
-        hotel_result = {"recommended_hotel": request.confirmed_hotel, "_skipped": True}
-        _trace(trace_sink, "hotel", "skipped")
-
+    flight_result:    dict | None = None
+    hotel_result:     dict | None = None
     transport_result: dict | None = None
-    if not needed["transport"]:
-        transport_result = {**request.confirmed_transport, "_skipped": True}
-        _trace(trace_sink, "transport", "skipped")
 
     # ── A2A Phase 2: parallel task submission ────────────────────────────────
     # All needed agents are fired simultaneously. Each agent is autonomous —
@@ -213,7 +227,10 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             data={**_base, "budget_cap": caps.get("flights", 0)},
             session_id=session_id,
         )
-        _trace(trace_sink, "flights", "done", cost=result.get("cost", 0))
+        _trace(trace_sink, "flights", "done",
+               cost=result.get("cost", 0),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Flight A2A done — cost=$%s", result.get("cost"))
         return result
 
@@ -228,7 +245,10 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             session_id=session_id,
         )
         _trace(trace_sink, "attractions", "done",
-               clusters=len(result.get("clusters", [])))
+               cost=result.get("total_cost", 0),
+               clusters=len(result.get("clusters", [])),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Attractions A2A done — clusters=%d", len(result.get("clusters", [])))
         return result
 
@@ -243,8 +263,12 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             data={**_base, "budget_cap": caps.get("hotel", 0)},
             session_id=session_id,
         )
+        hotel_cost = result.get("recommended_hotel", {}).get("total_cost", 0)
         _trace(trace_sink, "hotel", "done",
-               name=result.get("recommended_hotel", {}).get("name", ""))
+               cost=hotel_cost,
+               name=result.get("recommended_hotel", {}).get("name", ""),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Hotel A2A done — %s",
                     result.get("recommended_hotel", {}).get("name"))
         return result
@@ -259,7 +283,10 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             data={**_base, "budget_cap": caps.get("transport", 0)},
             session_id=session_id,
         )
-        _trace(trace_sink, "transport", "done", cost=result.get("total_cost", 0))
+        _trace(trace_sink, "transport", "done",
+               cost=result.get("total_cost", 0),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Transport A2A done — cost=$%s", result.get("total_cost"))
         return result
 

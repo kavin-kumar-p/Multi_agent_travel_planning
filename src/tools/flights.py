@@ -30,21 +30,23 @@ def search_flights(
     end_date: str,
     budget_cap: float,
 ) -> list[dict]:
-    dest_code = _dest_to_iata(destination)
+    origin_code = _dest_to_iata(origin)
+    dest_code   = _dest_to_iata(destination)
     all_flights = load_json("flights.json")
 
-    # Exact route match first
+    # Exact route match first — stamp requested origin so UI always has the right route
     exact = [
-        f for f in all_flights
+        {**f, "origin": origin_code}
+        for f in all_flights
         if f.get("destination") == dest_code and f.get("price", 9_999) <= budget_cap
     ]
     if exact:
         return exact
 
-    # Mock data covers a fixed set of routes; return budget-matched flights so the
-    # LLM always has real pricing to reason about instead of an empty list.
+    # Mock data covers a fixed set of routes; stamp the requested origin/destination
+    # so the LLM always receives the correct route even on representative pricing.
     return [
-        {**f, "destination": dest_code, "note": "representative pricing"}
+        {**f, "origin": origin_code, "destination": dest_code, "note": "representative pricing"}
         for f in all_flights
         if f.get("price", 9_999) <= budget_cap
     ]

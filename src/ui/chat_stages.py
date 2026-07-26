@@ -8,7 +8,7 @@ import time
 
 import streamlit as st
 
-from src.utils.extractor import extract_fields, follow_up, merge_info, missing_fields
+from src.utils.extractor import extract_fields, follow_up, is_on_topic, merge_info, missing_fields
 
 # Budget constants (same as budget_ui.py)
 _ACTIVE_WEIGHTS = {"flights": 40, "hotel": 30, "attractions": 20, "transport": 10}
@@ -60,9 +60,8 @@ def _start_planning_thread(rag_stores: dict) -> None:
     from src.coordinator.coordinator import TravelRequest
     from src.coordinator.coordinator import run as coordinator_run
 
-    info      = st.session_state.info
-    confirmed = st.session_state.confirmed_booked
-    split     = st.session_state.split_fractions or {}
+    info  = st.session_state.info
+    split = st.session_state.split_fractions or {}
     p_budget  = float(st.session_state.planning_budget or st.session_state.total_budget or 0)
 
     # Original query from the chat box — first user message in history
@@ -81,9 +80,6 @@ def _start_planning_thread(rag_stores: dict) -> None:
         end_date=info.get("end_date", ""),
         total_budget=p_budget,
         interests=info.get("interests") or [],
-        confirmed_flight={"_pre_booked": True}   if confirmed.get("flights")   else None,
-        confirmed_hotel={"_pre_booked": True}    if confirmed.get("hotel")     else None,
-        confirmed_transport={"_pre_booked": True} if confirmed.get("transport") else None,
         user_query=user_query,
         budget_split=budget_split,
     )
@@ -134,6 +130,17 @@ def _stage_input() -> None:
 
     if user_input := st.chat_input("Tell me about your trip…"):
         _user(user_input)
+        with st.spinner("Checking your message…"):
+            on_topic = is_on_topic(user_input)
+
+        if not on_topic:
+            _assistant(
+                "I'm a travel planning assistant — I can only help you plan trips. "
+                "Try something like: *\"Trip from NYC to Tokyo in March, $3000 budget\"*"
+            )
+            st.rerun()
+            return
+
         with st.spinner("Extracting trip details…"):
             info = extract_fields(user_input)
         st.session_state.info = info
@@ -167,10 +174,10 @@ def _stage_confirm_bookings() -> None:
 
     key  = items[idx]
     info = st.session_state.info
-    origin = info.get("origin", "your origin")
-    dest   = info.get("destination", "your destination")
-    start  = info.get("start_date", "?")
-    end    = info.get("end_date", "?")
+    origin = info.get("origin") or "your departure city"
+    dest   = info.get("destination") or "your destination"
+    start  = info.get("start_date") or "?"
+    end    = info.get("end_date") or "?"
 
     questions = {
         "flights": (
@@ -365,10 +372,30 @@ def _stage_followup() -> None:
         st.rerun()
         return
 
-    missing = missing_fields(info)
+    missing = missing_fields(info, st.session_state.get("confirmed_booked", {}))
 
-    if not missing or st.session_state.followup_count >= 4:
+    if not missing:
         st.session_state.stage = "summary"
+        st.rerun()
+        return
+
+    # After max attempts, only proceed if critical fields are filled
+    if st.session_state.followup_count >= 4:
+        still_missing = [f for f in ("origin", "destination") if not info.get(f)]
+        if still_missing:
+            with st.chat_message("assistant"):
+                fields_str = " and ".join(
+                    f.replace("_", " ") for f in still_missing
+                )
+                st.warning(
+                    f"I still need your **{fields_str}** to build your itinerary. "
+                    "I can't plan a trip without knowing where you're going. "
+                    "Please tell me these details to continue."
+                )
+            st.session_state.followup_count = 0
+            st.session_state.followup_question = None
+        else:
+            st.session_state.stage = "summary"
         st.rerun()
         return
 
@@ -384,9 +411,32 @@ def _stage_followup() -> None:
     if response := st.chat_input("Your answer…"):
         _assistant(q)
         _user(response)
+
+        with st.spinner("Checking your response…"):
+            on_topic = is_on_topic(response)
+
+        if not on_topic:
+            _assistant("I can only help with trip planning. Please share your trip details.")
+            st.session_state.followup_question = q
+            st.rerun()
+            return
+
         with st.spinner("Processing…"):
             new_info = extract_fields(response)
-        st.session_state.info = merge_info(info, new_info)
+
+        # destination and origin are protected once confirmed — incidental
+        # mentions (e.g. "NYC to Paris" when answering a budget question after
+        # Tokyo was already set) must not silently overwrite them.
+        # All other fields (dates, budget, interests) can be overridden by
+        # explicit values so that "March 10-20" always beats an inferred "June 1-8".
+        _protected = {"destination", "origin"}
+        filtered = {
+            k: v for k, v in new_info.items()
+            if k in missing
+            or not info.get(k)
+            or k not in _protected
+        }
+        st.session_state.info = merge_info(info, filtered)
         st.session_state.followup_count   += 1
         st.session_state.followup_question = None
         st.rerun()
@@ -400,21 +450,37 @@ def _stage_summary(rag_stores: dict) -> None:
     confirmed   = st.session_state.confirmed_booked
     booked_lbls = [_LABELS[k] for k in ("flights", "hotel", "transport") if confirmed.get(k)]
 
+    origin   = info.get("origin") or "Not specified"
+    dest     = info.get("destination") or "Not specified"
+    s_date   = info.get("start_date") or "?"
+    e_date   = info.get("end_date") or "?"
+    interests_str = ", ".join(info.get("interests") or []) or "General sightseeing"
+
     summary = (
         f"Here's your trip summary:\n\n"
-        f"- **From:** {info.get('origin', '?')}\n"
-        f"- **To:** {info.get('destination', '?')}\n"
-        f"- **Dates:** {info.get('start_date', '?')} → {info.get('end_date', '?')}\n"
+        f"- **From:** {origin}\n"
+        f"- **To:** {dest}\n"
+        f"- **Dates:** {s_date} → {e_date}\n"
         f"- **Planning budget:** ${p_budget:,.0f}"
         + (f"  *(pre-booked: {', '.join(booked_lbls)})*" if booked_lbls else "")
-        + f"\n- **Interests:** {', '.join(info.get('interests') or []) or 'General sightseeing'}\n\n"
+        + f"\n- **Interests:** {interests_str}\n\n"
         f"Ready to build your complete itinerary?"
+    )
+
+    flights_booked = st.session_state.get("confirmed_booked", {}).get("flights", False)
+    incomplete = (
+        (not info.get("origin") and not flights_booked)
+        or not info.get("destination")
+        or p_budget <= 0
     )
 
     with st.chat_message("assistant"):
         st.markdown(summary)
 
-    if st.button("Start Planning", type="primary", key="start_planning"):
+    if incomplete:
+        st.error("Origin, destination, and a budget are required before planning can start.")
+
+    if st.button("Start Planning", type="primary", key="start_planning", disabled=incomplete):
         _assistant(summary)
         _user("Yes, let's start planning!")
         # Reset planning state
@@ -424,6 +490,14 @@ def _stage_summary(rag_stores: dict) -> None:
         st.session_state.stage          = "planning"
         _start_planning_thread(rag_stores)
         st.rerun()
+
+
+_AGENT_LABELS = {
+    "flights": "Flight Agent", "attractions": "Attractions Agent",
+    "hotel": "Hotel Agent", "transport": "Transport Agent",
+    "coordinator": "Coordinator",
+}
+_AGENT_ORDER = ("flights", "attractions", "hotel", "transport")
 
 
 def _stage_planning() -> None:
@@ -437,16 +511,44 @@ def _stage_planning() -> None:
         if not traces:
             st.info("Initialising agents…")
         else:
-            running = [e for e in traces if e["status"] == "running"]
-            done    = [e for e in traces if e["status"] in ("done", "skipped")]
-            agent_labels = {
-                "flights": "Flight Agent", "attractions": "Attractions Agent",
-                "hotel": "Hotel Agent", "transport": "Transport Agent",
-                "coordinator": "Coordinator",
-            }
-            if running:
-                st.info(f"Running: **{agent_labels.get(running[-1]['agent'], running[-1]['agent'])}**")
-            st.progress(min(len(done) / 4, 1.0), text=f"{len(done)}/4 agents complete")
+            running_set = {e["agent"] for e in traces if e["status"] == "running"}
+            done_map    = {e["agent"]: e for e in traces if e["status"] == "done"}
+
+            st.progress(min(len(done_map) / 4, 1.0), text=f"{len(done_map)}/4 agents complete")
+
+            # ── Agent status ──────────────────────────────────────────────────
+            st.markdown("**Agent Status**")
+            for key in _AGENT_ORDER:
+                label = _AGENT_LABELS[key]
+                if key in done_map:
+                    event  = done_map[key]
+                    cost   = event.get("cost", 0)
+                    tokens = event.get("tokens", 0)
+                    parts  = [f"**{label}**"]
+                    if cost:
+                        parts.append(f"${cost:,.0f}")
+                    if tokens:
+                        parts.append(f"{tokens:,} tokens")
+                    st.success("  done  |  " + "  |  ".join(parts))
+                elif key in running_set:
+                    st.info(f"  running  |  **{label}**")
+
+            # ── A2A communication log ─────────────────────────────────────────
+            st.markdown("**A2A Communication**")
+            a2a_lines = []
+            # Coordinator -> each agent (from running events, preserved in order)
+            for e in traces:
+                if e["status"] == "running":
+                    a2a_lines.append(f"Coordinator  ->  {_AGENT_LABELS.get(e['agent'], e['agent'])}")
+            # Agent -> peer (from done events, in completion order)
+            for e in traces:
+                if e["status"] == "done":
+                    src = _AGENT_LABELS.get(e["agent"], e["agent"])
+                    for peer in e.get("peer_calls", []):
+                        a2a_lines.append(f"{src}  ->  {peer}")
+
+            if a2a_lines:
+                st.code("\n".join(a2a_lines), language=None)
 
     if thread and not thread.is_alive():
         if "error" in st.session_state.result_box:
@@ -478,17 +580,19 @@ def _stage_done() -> None:
 
         # Flight summary
         flight = itinerary.get("flights")
-        if flight and not flight.get("_skipped"):
+        if flight:
             st.markdown("**Flights**")
             recs = flight.get("recommended_flights", [])
             cost = flight.get("cost", 0)
             if recs:
-                f = recs[0]
-                airline  = f.get("airline", "?")
-                origin   = f.get("departure") or f.get("origin", "?")
-                dest     = f.get("arrival") or f.get("destination", "?")
-                price    = f.get("price") or cost
-                st.markdown(f"- {airline} · {origin} → {dest} · ${price:,.0f}")
+                for f in recs:
+                    airline = f.get("airline", "?")
+                    origin  = f.get("origin", "?")
+                    dest    = f.get("destination", "?")
+                    price   = f.get("price", 0)
+                    layovers = f.get("layovers", 0)
+                    stop_str = "direct" if layovers == 0 else f"{layovers} stop"
+                    st.markdown(f"- {airline} · {origin} → {dest} · ${price:,.0f} · {stop_str}")
             elif cost:
                 st.markdown(f"- Cost: ${cost:,.0f}")
             else:
@@ -507,7 +611,7 @@ def _stage_done() -> None:
 
         # Hotel summary
         hotel = itinerary.get("hotel")
-        if hotel and not hotel.get("_skipped"):
+        if hotel:
             h = hotel.get("recommended_hotel", {})
             if h:
                 st.markdown(
@@ -517,7 +621,7 @@ def _stage_done() -> None:
 
         # Transport summary
         transport = itinerary.get("transport")
-        if transport and not transport.get("_skipped"):
+        if transport:
             st.markdown(
                 f"**Transport** — Total: ${transport.get('total_cost', 0):,.0f}"
             )
@@ -525,12 +629,30 @@ def _stage_done() -> None:
             for tip in tips[:3]:
                 st.markdown(f"  - {tip}")
 
-        # Budget summary
+        # Per-agent cost breakdown
+        breakdown = itinerary.get("budget_breakdown", {})
+        caps      = itinerary.get("budget_caps", {})
+        st.markdown("**Cost Breakdown**")
+        cols = st.columns(4)
+        for i, (key, label) in enumerate([
+            ("flights", "Flights"), ("attractions", "Attractions"),
+            ("hotel", "Hotel"), ("transport", "Transport"),
+        ]):
+            spent_k = breakdown.get(key, 0)
+            cap_k   = caps.get(key, 0)
+            if cap_k:
+                diff = cap_k - spent_k
+                delta_str = f"+${diff:,.0f} under cap" if diff >= 0 else f"-${abs(diff):,.0f} over cap"
+                cols[i].metric(label, f"${spent_k:,.0f}", delta=delta_str, delta_color="normal")
+            else:
+                cols[i].metric(label, f"${spent_k:,.0f}")
+
+        # Total budget summary
         spent  = itinerary.get("total_spent", 0)
         budget = itinerary.get("total_budget", 0)
         within = itinerary.get("within_budget", True)
-        status = "within budget" if within else "over budget"
-        st.markdown(f"\n**Budget:** ${spent:,.2f} of ${budget:,.0f} — *{status}*")
+        status = "within budget ✅" if within else "over budget ⚠️"
+        st.markdown(f"**Total:** ${spent:,.2f} of ${budget:,.0f} — *{status}*")
 
     # st.expander + st.json must live outside st.chat_message to render correctly
     with st.expander("Raw itinerary (JSON)"):

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import logging
 import os
+import sys
 import threading
 
 # Disable CrewAI/OpenTelemetry telemetry before any crewai imports
@@ -11,6 +13,27 @@ os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 os.environ.setdefault("CREWAI_TELEMETRY_OPT_OUT", "1")
 
 import streamlit as st
+
+
+def _configure_logging() -> None:
+    fmt = logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    if not root.handlers:
+        root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+    # Silence noisy third-party loggers
+    for noisy in ("httpx", "httpcore", "urllib3", "uvicorn.access", "watchdog"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+_configure_logging()
 
 from src.ui.state import init_state
 from src.ui.components import render_traces, render_session

@@ -8,11 +8,12 @@ logger = logging.getLogger(__name__)
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
-def validate(request) -> list[str]:
+def validate(request, needed: dict | None = None) -> list[str]:
     issues = []
-    if not request.destination.strip():
+    if not (request.destination or "").strip():
         issues.append("destination is missing")
-    if not request.origin.strip():
+    flights_needed = (needed or {}).get("flights", True)
+    if flights_needed and not (request.origin or "").strip():
         issues.append("origin is missing")
     if not request.start_date:
         issues.append("start_date is missing")
@@ -28,12 +29,7 @@ def validate(request) -> list[str]:
 # ── Agent selection ───────────────────────────────────────────────────────────
 
 def needed_agents(request) -> dict[str, bool]:
-    return {
-        "flights":     request.confirmed_flight is None,
-        "attractions": True,
-        "hotel":       request.confirmed_hotel is None,
-        "transport":   request.confirmed_transport is None,
-    }
+    return {"flights": True, "attractions": True, "hotel": True, "transport": True}
 
 
 # ── Budget split ──────────────────────────────────────────────────────────────
@@ -80,6 +76,7 @@ def assemble(session, results: dict, request) -> dict:
             k: session.agent_results.get(k, {}).get("cost", 0)
             for k in ("flights", "attractions", "hotel", "transport")
         },
+        "budget_caps": dict(session.per_agent_caps),
         "flights":     results.get("flights"),
         "attractions": results.get("attractions"),
         "hotel":       results.get("hotel"),

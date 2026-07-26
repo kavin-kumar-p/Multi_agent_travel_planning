@@ -1,23 +1,14 @@
 """Transport Agent — CrewAI + A2A server on port 8004.
 
+Framework: CrewAI (single-agent Crew)
 A2A endpoints:
   GET  /.well-known/agent.json
   GET  /health
   POST /send_message  ← coordinator sends task here
 
-A2A flow:
-  Asks Flight, Attractions, and Hotel agents directly in parallel via
-  POST /send_message before running its own CrewAI pipeline:
-    - Flight (query_type="date_confirmation") → confirmed_dates
-    - Attractions (query_type="cluster_areas") → attraction_clusters
-    - Hotel (query_type="hotel_location") → hotel_location
-
-Phase 1: parallel RAG (destinations) + MCP (search_transit)
-Phase 2: CrewAI Transport Planning Specialist reasons over combined data
-
-Output DataPart keys:
-  airport_transfer (mode, cost, duration), daily_transit (mode, daily_pass_cost),
-  total_cost, tips (list)
+Prompt:   prompts/transport_agent.md  (system + autonomous + user_template)
+Tools:    search_destination_transport (RAG), search_available_transit (MCP),
+          call_peer_agent (generic A2A — LLM picks which peers to call)
 """
 from __future__ import annotations
 
@@ -26,18 +17,29 @@ import json
 import logging
 import os
 
-from crewai import Agent, Crew, LLM, Process, Task
+from crewai import Agent as CrewAgent, Crew, LLM as CrewLLM, Task as CrewTask
 
-from src import tools
-from src.a2a.client import A2AClient
 from src.a2a.models import AgentCapabilities, AgentCard
 from src.a2a.server import create_agent_app
-from src.config.constants import ATTRACTIONS_URL, FLIGHT_URL, HOTEL_URL, TRANSPORT_URL
+from src.a2a.registry import AgentRegistry
+from src.config.constants import (
+    ALL_AGENT_URLS,
+    TRANSPORT_URL,
+    RATE_LIMIT_BACKOFF_BASE,
+    RATE_LIMIT_BASE_WAIT,
+    RATE_LIMIT_MAX_ATTEMPTS,
+    RATE_LIMIT_MAX_RETRIES,
+)
 from src.config.settings import settings
 from src.llm.factory import get_embeddings
 from src.prompts import load_prompt
 from src.rag.bootstrap import load_or_build
-from src.rag.retriever import retrieve
+from src.a2a.task_manager import TaskManager
+from src.tools.agent_tools import (
+    make_generic_peer_tool_crew,
+    make_rag_tool_crew,
+    make_transit_search_tool_crew,
+)
 from src.utils import parse_agent_json
 
 os.environ.setdefault("GOOGLE_API_KEY", settings.google_api_key or "")
@@ -47,169 +49,146 @@ os.environ.setdefault("CREWAI_TELEMETRY_OPT_OUT", "1")
 logger = logging.getLogger(__name__)
 
 _rag_stores: dict = {}
-
-# Session store — keyed by session_id, holds completed results
-_session_results: dict[str, dict] = {}
+_llm: CrewLLM | None = None
+_registry = AgentRegistry(ALL_AGENT_URLS)
+_task_manager = TaskManager()
 
 CARD = AgentCard(
     name="Transport Agent",
     description=(
-        "Plans airport transfers and daily transit using a CrewAI Crew. "
-        "Calls Flight, Attractions, and Hotel agents directly via A2A in parallel "
-        "to gather confirmed dates, attraction clusters, and hotel location. "
-        "Phase 1: parallel RAG (destinations) + MCP (search_transit). "
-        "Phase 2: CrewAI Transport Planning Specialist. Framework: CrewAI."
+        "Plans airport transfers and daily transit using a CrewAI single-agent Crew. "
+        "Autonomously calls Flight, Attractions, and Hotel agents via A2A for context. "
+        "Tools: search_destination_transport, search_available_transit, "
+        "call_peer_agent."
     ),
     url=TRANSPORT_URL,
     capabilities=AgentCapabilities(),
 )
 
 
-# ── A2A server lifecycle ──────────────────────────────────────────────────────
-
 async def _startup() -> None:
-    global _rag_stores
+    global _rag_stores, _llm
     logger.info("Transport Agent: loading RAG stores…")
     _rag_stores = await load_or_build(get_embeddings())
+    _llm = CrewLLM(
+        model=f"gemini/{settings.transport_agent_model}",
+        api_key=settings.google_api_key,
+        temperature=0.1,
+    )
     logger.info("Transport Agent: ready on :8004")
 
 
 async def _handle(input_data: dict) -> dict:
     session_id  = input_data.get("session_id", "default")
-    destination = input_data["destination"]
-    budget_cap  = input_data["budget_cap"]
+    destination = input_data.get("destination", "")
+    start_date  = input_data.get("start_date", "")
+    end_date    = input_data.get("end_date", "")
+    budget_cap  = float(input_data.get("budget_cap", 0))
 
-    # Transport is last — no peer queries to handle.
-    # Ask all three upstream agents directly in parallel (all should be done by now).
+    fallback: dict = {"airport_transfer": {}, "daily_transit": {}, "total_cost": 0, "tips": []}
 
-    async def _ask_flight() -> str | None:
-        try:
-            r = await A2AClient(FLIGHT_URL).send_message(
-                text="What are the confirmed travel dates?",
-                data={
-                    "query_type": "date_confirmation",
-                    "session_id": session_id,
-                    "start_date": input_data["start_date"],
-                    "end_date":   input_data["end_date"],
-                },
-            )
-            return r.get("confirmed_dates")
-        except Exception as exc:
-            logger.warning("Transport: Flight Agent unavailable (%s)", exc)
-            return None
+    should_run, task = _task_manager.start(session_id)
+    if not should_run:
+        logger.info("Transport Agent: task already %s for session %s", task.state, session_id)
+        await task.wait()
+        return task.result or fallback
 
-    async def _ask_attractions() -> list:
-        try:
-            r = await A2AClient(ATTRACTIONS_URL).send_message(
-                text="Which geographic areas are you clustering attractions in?",
-                data={
-                    "query_type":  "cluster_areas",
-                    "session_id":  session_id,
-                    "destination": destination,
-                },
-            )
-            return r.get("clusters", [])
-        except Exception as exc:
-            logger.warning("Transport: Attractions Agent unavailable (%s)", exc)
-            return []
-
-    async def _ask_hotel() -> str:
-        try:
-            r = await A2AClient(HOTEL_URL).send_message(
-                text="Where is the selected hotel located?",
-                data={
-                    "query_type":  "hotel_location",
-                    "session_id":  session_id,
-                    "destination": destination,
-                },
-            )
-            return r.get("hotel_location") or destination
-        except Exception as exc:
-            logger.warning("Transport: Hotel Agent unavailable (%s)", exc)
-            return destination
-
-    confirmed_dates, attraction_clusters, hotel_location = await asyncio.gather(
-        _ask_flight(), _ask_attractions(), _ask_hotel()
-    )
-    confirmed_dates = (
-        confirmed_dates
-        or f"{input_data['start_date']} to {input_data['end_date']}"
-    )
-
-    # Phase 1: parallel RAG + MCP
-    dest_chunks, transit_options = await asyncio.gather(
-        asyncio.to_thread(
-            retrieve, _rag_stores, "destinations",
-            f"transport transit {destination}",
-        ),
-        asyncio.to_thread(tools.search_transit, destination),
-    )
-
-    prompt        = load_prompt("transport_agent")
-    clusters_json = json.dumps(attraction_clusters, ensure_ascii=False)
-    task_description = (
-        f"{prompt['system']}\n\n"
-        f"## Destination Transport Info\n{chr(10).join(dest_chunks)}\n\n"
-        f"## Live Transit Options\n{json.dumps(transit_options, indent=2, ensure_ascii=False)}\n\n"
-        f"## Task\n"
-        + prompt["user_template"].format(
-            destination=destination,
-            hotel_location=hotel_location,
-            attraction_clusters=clusters_json,
-            confirmed_dates=confirmed_dates,
-            budget_cap=budget_cap,
+    try:
+        _p     = load_prompt("transport_agent")
+        system = (
+            _p["system"]
+            + "\n\n"
+            + _p["autonomous_decision_making"].format(budget_cap=f"{budget_cap:.2f}")
         )
-    )
 
-    # Phase 2: CrewAI crew
-    crewai_llm = LLM(
-        model=f"gemini/{settings.transport_agent_model}",
-        api_key=settings.google_api_key,
-    )
-    planner = Agent(
-        role="Transport Planning Specialist",
-        goal=(
-            f"Arrange optimal airport transfers and daily transit for {destination}, "
-            f"staying at {hotel_location}, within ${budget_cap:.2f}."
-        ),
-        backstory=(
-            "Expert in local transit systems and airport logistics. "
-            "Balances convenience, cost, and coverage for every leg of the trip."
-        ),
-        llm=crewai_llm, verbose=False, allow_delegation=False,
-    )
-    planning_task = Task(
-        description=task_description,
-        expected_output=(
-            "JSON object with keys: airport_transfer (mode, cost, duration), "
-            "daily_transit (mode, daily_pass_cost), total_cost (number), tips (list)."
-        ),
-        agent=planner,
-    )
-    crew       = Crew(agents=[planner], tasks=[planning_task],
-                      process=Process.sequential, verbose=False)
-    crew_output = await asyncio.to_thread(crew.kickoff)
-    raw_text    = crew_output.raw if hasattr(crew_output, "raw") else str(crew_output)
+        text    = input_data.get("_text", "")
+        context = {k: v for k, v in input_data.items() if k != "_text"}
+        user_msg = _p["user_template"].format(
+            destination=destination,
+            hotel_location="[will be fetched from Hotel Agent via A2A]",
+            attraction_clusters="[will be fetched from Attractions Agent via A2A]",
+            confirmed_dates=f"{start_date} to {end_date}",
+            budget_cap=budget_cap,
+        ) if destination else f"{text}\n\nRequest context: {json.dumps(context)}"
 
-    fallback: dict = {
-        "airport_transfer": {}, "daily_transit": {}, "total_cost": 0, "tips": [],
-    }
-    if transit_options:
-        opt = transit_options[0]
-        fallback = {
-            "airport_transfer": opt.get("airport_transfer", {}),
-            "daily_transit":    opt.get("daily_pass", {}),
-            "total_cost": 50,
-            "tips": opt.get("tips", []),
-        }
+        llm = _llm or CrewLLM(
+            model=f"gemini/{settings.transport_agent_model}",
+            api_key=settings.google_api_key,
+            temperature=0.1,
+        )
 
-    result = parse_agent_json(raw_text, fallback)
-    _session_results[session_id] = result
-    logger.info(
-        "Transport Agent done: total_cost=$%s (session=%s)",
-        result.get("total_cost"), session_id,
-    )
-    return result
+        await _registry.discover()
+        peer_descriptions = _registry.agent_descriptions(exclude="transport")
+        system_with_peers = (
+            system
+            + f"\n\nAvailable peer agents (use call_peer_agent to contact them):\n{peer_descriptions}"
+        )
+
+        peer_call_log: list[str] = []
+        tools = [
+            make_rag_tool_crew(
+                _rag_stores, "destinations",
+                "search_destination_transport",
+                "Search the destinations knowledge base for transport infrastructure, "
+                "transit systems, and logistics at the destination.",
+            ),
+            make_transit_search_tool_crew(),
+            make_generic_peer_tool_crew(
+                _registry, session_id,
+                extra_data={"start_date": start_date, "end_date": end_date, "destination": destination},
+                peer_call_log=peer_call_log,
+            ),
+        ]
+
+        crew_agent = CrewAgent(
+            role="Transport Specialist",
+            goal="Plan all ground transport — airport transfers and daily in-city transit — within budget.",
+            backstory=system_with_peers,
+            llm=llm,
+            tools=tools,
+            verbose=False,
+            allow_delegation=False,
+        )
+
+        crew_task = CrewTask(
+            description=user_msg,
+            expected_output=(
+                "Valid JSON with keys: airport_transfer (object), daily_transit (object), "
+                "key_routes (list), total_cost (number), tips (list of strings). "
+                "No markdown, no prose outside the JSON block."
+            ),
+            agent=crew_agent,
+        )
+
+        crew = Crew(agents=[crew_agent], tasks=[crew_task], verbose=False)
+        import re as _re
+        for _attempt in range(RATE_LIMIT_MAX_ATTEMPTS):
+            try:
+                crew_result = await asyncio.to_thread(crew.kickoff)
+                break
+            except Exception as _exc:
+                _msg = str(_exc)
+                if "429" in _msg and _attempt < RATE_LIMIT_MAX_RETRIES:
+                    _m = _re.search(r"retry[^\d]*(\d+)", _msg, _re.IGNORECASE)
+                    _wait = int(_m.group(1)) if _m else RATE_LIMIT_BASE_WAIT * (RATE_LIMIT_BACKOFF_BASE ** _attempt)
+                    logger.warning("Transport Agent rate limited — retrying in %ds (attempt %d/%d)", _wait, _attempt + 1, RATE_LIMIT_MAX_RETRIES)
+                    await asyncio.sleep(_wait)
+                else:
+                    raise
+        final_text = str(crew_result)
+
+        result = parse_agent_json(final_text, fallback)
+        result["_peer_calls"] = peer_call_log
+
+        logger.info(
+            "Transport Agent done: total_cost=$%s peer_calls=%s (session=%s)",
+            result.get("total_cost"), peer_call_log, session_id,
+        )
+        task.complete(result)
+        return result
+    except Exception:
+        task.fail()
+        raise
 
 
 app = create_agent_app(CARD, _handle, startup=_startup)
