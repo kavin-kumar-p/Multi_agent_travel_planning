@@ -19,7 +19,7 @@ import os
 
 from crewai import Agent as CrewAgent, Crew, LLM as CrewLLM, Task as CrewTask
 
-from src.a2a.models import AgentCapabilities, AgentCard
+from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 from src.a2a.server import create_agent_app
 from src.a2a.registry import AgentRegistry
 from src.config.constants import (
@@ -62,8 +62,11 @@ CARD = AgentCard(
         "Calls peer agents via A2A when it needs context (e.g. attraction clusters from Attractions Agent). "
         "Tools: search_hotel_knowledge, search_available_hotels, call_peer_agent."
     ),
-    url=HOTEL_URL,
+    supported_interfaces=[AgentInterface(url=HOTEL_URL)],
+    version="1.0.0",
     capabilities=AgentCapabilities(),
+    default_input_modes=["text", "data"],
+    default_output_modes=["data"],
 )
 
 
@@ -80,11 +83,13 @@ async def _startup() -> None:
 
 
 async def _handle(input_data: dict) -> dict:
-    session_id  = input_data.get("session_id", "default")
-    destination = input_data.get("destination", "")
-    start_date  = input_data.get("start_date", "")
-    end_date    = input_data.get("end_date", "")
-    budget_cap  = float(input_data.get("budget_cap", 0))
+    session_id      = input_data.get("session_id", "default")
+    destination     = input_data.get("destination", "")
+    start_date      = input_data.get("start_date", "")
+    end_date        = input_data.get("end_date", "")
+    budget_cap      = float(input_data.get("budget_cap", 0))
+    skipped_agents  = input_data.get("skipped_agents", [])
+    requested_hotel = input_data.get("requested_hotel", "")
 
     fallback: dict = {"recommended_hotel": {}, "over_budget": False, "policy_notes": ""}
 
@@ -98,13 +103,37 @@ async def _handle(input_data: dict) -> dict:
         _p     = load_prompt("hotel_agent")
         system = _p["system"] + "\n\n" + _p["autonomous_decision_making"]
 
+        if requested_hotel:
+            system += (
+                f"\n\nThe user specifically requested: '{requested_hotel}'. "
+                f"You MUST search for this exact hotel first in {destination}. "
+                f"If it exists in {destination} and is within budget, select it. "
+                f"If the hotel name suggests a different city or country (e.g. 'Paris Marriott' when "
+                f"destination is {destination}), set policy_notes to warn the user of the mismatch "
+                "and fall back to the best available hotel in the actual destination."
+            )
+
+        if skipped_agents:
+            system += (
+                f"\n\nSkipped agents (DO NOT call these via call_peer_agent — "
+                f"they were not invoked this session): {', '.join(skipped_agents)}. "
+                "If attractions is skipped, select the best hotel by price, rating, "
+                "and central location without proximity-to-cluster ranking."
+            )
+
         text    = input_data.get("_text", "")
         context = {k: v for k, v in input_data.items() if k != "_text"}
+        clusters_hint = (
+            "[attractions agent skipped — select by price, rating, and central location]"
+            if "attractions" in skipped_agents
+            else "[will be fetched from Attractions Agent via A2A]"
+        )
+        hotel_hint = f"Specifically requested: {requested_hotel}" if requested_hotel else clusters_hint
         user_msg = _p["user_template"].format(
             destination=destination,
             start_date=start_date,
             end_date=end_date,
-            attraction_clusters="[will be fetched from Attractions Agent via A2A]",
+            attraction_clusters=hotel_hint,
             budget_cap=budget_cap,
         ) if destination else f"{text}\n\nRequest context: {json.dumps(context)}"
 
@@ -134,6 +163,7 @@ async def _handle(input_data: dict) -> dict:
                 _registry, session_id,
                 extra_data={"destination": destination},
                 peer_call_log=peer_call_log,
+                caller=CARD.name,
             ),
         ]
 

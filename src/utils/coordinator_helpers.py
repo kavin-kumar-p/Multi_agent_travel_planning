@@ -50,7 +50,7 @@ def record_costs(session, results: dict, needed: dict[str, bool]) -> None:
     session.agent_results.clear()
     if needed["flights"] and results.get("flights"):
         session.record_cost("flights", results["flights"].get("cost", 0))
-    if results.get("attractions"):
+    if needed.get("attractions") and results.get("attractions"):
         session.record_cost("attractions", results["attractions"].get("total_cost", 0))
     if needed["hotel"] and results.get("hotel"):
         session.record_cost(

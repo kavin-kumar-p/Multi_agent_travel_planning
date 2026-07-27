@@ -1,4 +1,4 @@
-"""A2AClient — HTTP client for calling A2A agent servers.
+"""A2A client — official a2a-sdk v1.1+ (create_client + minimal_agent_card).
 
 Usage:
     client = A2AClient("http://127.0.0.1:8001")
@@ -10,53 +10,50 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Awaitable, Callable
 
 import httpx
+from google.protobuf import json_format, struct_pb2
+
+from a2a.client import A2ACardResolver
+from a2a.client.client import ClientCallContext, ClientConfig
+from a2a.client.client_factory import create_client, minimal_agent_card
+from a2a.types import (
+    AgentCard,
+    Message,
+    Part,
+    Role,
+    SendMessageRequest,
+)
+from a2a.utils.constants import PROTOCOL_VERSION_1_0, VERSION_HEADER, TransportProtocol
 
 from src.config.constants import CARD_TIMEOUT, HEALTH_TIMEOUT, SEND_TIMEOUT
-from src.a2a.models import (
-    AgentCard,
-    Artifact,
-    DataPart,
-    Message,
-    MessageSendParams,
-    SendMessageRequest,
-    SendMessageResponse,
-    Task,
-    TaskStatus,
-    TextPart,
-)
 
 logger = logging.getLogger(__name__)
 
+# v1.0 protocol version context — required by DefaultRequestHandlerV2's validate_version decorator
+_V1_CONTEXT = ClientCallContext(service_parameters={VERSION_HEADER: PROTOCOL_VERSION_1_0})
+
 
 class A2AClient:
-    """Typed HTTP client implementing the Google A2A protocol."""
+    """A2A client using the official SDK create_client + minimal_agent_card."""
 
     def __init__(self, agent_url: str) -> None:
         self.agent_url = agent_url.rstrip("/")
 
-    # ── Discovery & health ────────────────────────────────────────────────────
-
     async def get_agent_card(self) -> AgentCard:
-        """Fetch the AgentCard — agent discovery step."""
-        async with httpx.AsyncClient(timeout=CARD_TIMEOUT) as client:
-            resp = await client.get(f"{self.agent_url}/.well-known/agent.json")
-            resp.raise_for_status()
-            return AgentCard(**resp.json())
+        """Fetch and return the SDK AgentCard from /.well-known/agent.json."""
+        async with httpx.AsyncClient(timeout=CARD_TIMEOUT) as http:
+            resolver = A2ACardResolver(http, self.agent_url)
+            return await resolver.get_agent_card()
 
     async def health_check(self) -> bool:
         """Return True if the agent is reachable and healthy."""
         try:
-            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
-                resp = await client.get(f"{self.agent_url}/health")
+            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as http:
+                resp = await http.get(f"{self.agent_url}/health")
                 return resp.status_code == 200
         except Exception:
             return False
-
-
-    # ── Task submission ───────────────────────────────────────────────────────
 
     async def send_message(
         self,
@@ -64,98 +61,56 @@ class A2AClient:
         *,
         data: dict | None = None,
         session_id: str | None = None,
-        on_input_needed: Callable[[str, dict], Awaitable[str]] | None = None,
     ) -> dict:
-        """
-        Send a message/send JSON-RPC request to the agent.
+        """Send a message and return the DataPart result dict."""
+        parts: list[Part] = [Part(text=text)]
+        if data:
+            value = struct_pb2.Value()
+            json_format.ParseDict(data, value)
+            parts.append(Part(data=value))
 
-        Supports multi-turn back-and-forth: if the agent returns INPUT_REQUIRED,
-        `on_input_needed(question, context)` is called to get an answer and the
-        conversation continues. If no callback is provided, a default "proceed"
-        reply is sent so the agent can continue with available information.
-
-        Max 3 back-and-forth turns before giving up and raising an error.
-        """
-        task = await self._post(text, data=data, session_id=session_id)
-
-        turns = 0
-        while task.status == TaskStatus.INPUT_REQUIRED and turns < 3:
-            turns += 1
-            question, context = _extract_question(task)
-            logger.info("A2A ↔ %s  input needed (turn %d): %s", self.agent_url, turns, question[:80])
-
-            if on_input_needed:
-                answer = await on_input_needed(question, context)
-            else:
-                answer = "Please proceed with the available information."
-
-            task = await self._post(
-                answer,
-                data={"_answer": answer, "session_id": session_id, **context},
-                session_id=session_id,
+        request = SendMessageRequest(
+            message=Message(
+                message_id=str(uuid.uuid4()),
+                context_id=session_id or str(uuid.uuid4()),
+                role=Role.ROLE_USER,
+                parts=parts,
             )
+        )
 
-        if task.status == TaskStatus.FAILED:
-            raise RuntimeError(f"A2A task {task.id} failed: {task.error}")
-        if task.status == TaskStatus.INPUT_REQUIRED:
-            raise RuntimeError(f"A2A task {task.id} still needs input after 3 turns")
+        logger.info("A2A → %s  %s", self.agent_url, text[:80])
+
+        config = ClientConfig(
+            httpx_client=httpx.AsyncClient(timeout=SEND_TIMEOUT),
+            streaming=False,
+        )
+        sdk_client = await create_client(
+            minimal_agent_card(url=self.agent_url, transports=[TransportProtocol.JSONRPC]),
+            client_config=config,
+        )
+
+        task = None
+        async for stream_response in sdk_client.send_message(request, context=_V1_CONTEXT):
+            if stream_response.HasField("task"):
+                task = stream_response.task
+
+        if task is None:
+            raise RuntimeError(f"No task in response from {self.agent_url}")
 
         result = _extract_data(task)
         logger.info("A2A ← %s  task %s completed", self.agent_url, task.id)
         return result
 
-    async def _post(
-        self,
-        text: str,
-        *,
-        data: dict | None = None,
-        session_id: str | None = None,
-    ) -> Task:
-        """Send one message and return the raw Task."""
-        parts: list = [TextPart(text=text)]
-        if data:
-            parts.append(DataPart(data=data))
 
-        request = SendMessageRequest(
-            id=str(uuid.uuid4()),
-            params=MessageSendParams(
-                message=Message(role="user", parts=parts),
-                session_id=session_id,
-            ),
-        )
-        logger.info("A2A → %s  %s", self.agent_url, text[:80])
-        async with httpx.AsyncClient(timeout=SEND_TIMEOUT) as client:
-            resp = await client.post(
-                f"{self.agent_url}/send_message",
-                json=request.model_dump(mode="json"),
-            )
-            resp.raise_for_status()
-
-        response = SendMessageResponse(**resp.json())
-        if response.error:
-            raise RuntimeError(f"A2A agent error from {self.agent_url}: {response.error}")
-        return response.result
-
-
-def _extract_data(task: Task) -> dict:
-    """Pull the DataPart payload out of a completed Task's first artifact."""
+def _extract_data(task) -> dict:
+    """Pull the data payload from the first artifact of a completed Task."""
     for artifact in task.artifacts:
         for part in artifact.parts:
-            if isinstance(part, DataPart):
-                return part.data
-    raise RuntimeError(f"Task {task.id} returned no DataPart artifact")
-
-
-def _extract_question(task: Task) -> tuple[str, dict]:
-    """Extract the question and context from an INPUT_REQUIRED task's agent message."""
-    for msg in reversed(task.messages):
-        if msg.role == "agent":
-            question = ""
-            context: dict = {}
-            for part in msg.parts:
-                if isinstance(part, TextPart):
-                    question = part.text
-                elif isinstance(part, DataPart):
-                    context = {k: v for k, v in part.data.items() if k != "_question"}
-            return question, context
-    return "Please provide more information.", {}
+            try:
+                if part.HasField("data"):
+                    raw = json_format.MessageToDict(part.data)
+                    if isinstance(raw, dict):
+                        return raw
+            except ValueError:
+                pass
+    raise RuntimeError(f"Task {task.id} returned no data artifact")

@@ -152,7 +152,10 @@ class _CrewHotelSearchTool(CrewBaseTool):
 
     def _run(self, budget_per_night: float) -> str:
         hotels = mcp_tools.search_hotels(self._destination, budget_per_night * self._buffer)
-        logger.info("search_available_hotels: %d options in %s", len(hotels), self._destination)
+        if hotels:
+            logger.info("search_available_hotels: %d options in %s", len(hotels), self._destination)
+        else:
+            logger.warning("search_available_hotels: 0 results for '%s' — agent may hallucinate a hotel", self._destination)
         return json.dumps(hotels)
 
 
@@ -197,6 +200,7 @@ def make_generic_peer_tool(
     session_id: str,
     extra_data: dict | None = None,
     peer_call_log: list | None = None,
+    caller: str = "agent",
 ) -> StructuredTool:
     """LangGraph: one tool that can call ANY discovered peer agent.
 
@@ -210,16 +214,17 @@ def make_generic_peer_tool(
     async def _call(agent_name: str, question: str) -> str:
         if peer_call_log is not None:
             peer_call_log.append(agent_name)
+        logger.info("PEER CALL  %s → %s | %s", caller, agent_name, question[:100])
         try:
             url = registry.find(agent_name)
             result = await A2AClient(url).send_message(
                 text=question,
                 data={"session_id": session_id, **_extra},
             )
-            logger.info("call_peer_agent '%s' responded: %s", agent_name, str(result)[:120])
+            logger.info("PEER REPLY %s ← %s | %s", caller, agent_name, str(result)[:120])
             return json.dumps(result)
         except Exception as exc:
-            logger.warning("call_peer_agent '%s' failed: %s", agent_name, exc)
+            logger.warning("PEER FAIL  %s ← %s | %s", caller, agent_name, exc)
             return json.dumps({"error": str(exc)})
 
     return StructuredTool.from_function(
@@ -246,6 +251,7 @@ class _CrewGenericPeerTool(CrewBaseTool):
     _session_id: str = PrivateAttr()
     _extra: dict = PrivateAttr()
     _log: Any = PrivateAttr(default=None)
+    _caller: str = PrivateAttr(default="agent")
 
     def __init__(
         self,
@@ -253,6 +259,7 @@ class _CrewGenericPeerTool(CrewBaseTool):
         session_id: str,
         extra_data: dict | None = None,
         peer_call_log: list | None = None,
+        caller: str = "agent",
         **data: Any,
     ) -> None:
         super().__init__(**data)
@@ -260,21 +267,23 @@ class _CrewGenericPeerTool(CrewBaseTool):
         self._session_id = session_id
         self._extra = extra_data or {}
         self._log = peer_call_log
+        self._caller = caller
 
     async def _run(self, agent_name: str, question: str) -> str:
         from src.a2a.client import A2AClient
         if self._log is not None:
             self._log.append(agent_name)
+        logger.info("PEER CALL  %s → %s | %s", self._caller, agent_name, question[:100])
         try:
             url = self._registry.find(agent_name)
             result = await A2AClient(url).send_message(
                 text=question,
                 data={"session_id": self._session_id, **self._extra},
             )
-            logger.info("call_peer_agent '%s' responded: %s", agent_name, str(result)[:120])
+            logger.info("PEER REPLY %s ← %s | %s", self._caller, agent_name, str(result)[:120])
             return json.dumps(result)
         except Exception as exc:
-            logger.warning("call_peer_agent '%s' failed: %s", agent_name, exc)
+            logger.warning("PEER FAIL  %s ← %s | %s", self._caller, agent_name, exc)
             return json.dumps({"error": str(exc)})
 
 
@@ -283,10 +292,12 @@ def make_generic_peer_tool_crew(
     session_id: str,
     extra_data: dict | None = None,
     peer_call_log: list | None = None,
+    caller: str = "agent",
 ) -> _CrewGenericPeerTool:
     return _CrewGenericPeerTool(
         registry=registry,
         session_id=session_id,
         extra_data=extra_data,
         peer_call_log=peer_call_log,
+        caller=caller,
     )

@@ -14,9 +14,11 @@ Return ONLY a JSON object (use null for anything not mentioned):
   "end_date": "YYYY-MM-DD or null",
   "total_budget": number in USD or null,
   "interests": ["list", "of", "interests"] or [],
-  "flight_booked": true ONLY if the user says their flights are ALREADY done/sorted/paid,
-  "hotel_booked":  true ONLY if the user says their hotel is ALREADY booked/sorted/paid,
-  "transport_booked": true ONLY if local transport is ALREADY arranged by them
+  "flight_booked":      true ONLY if the user says their flights are ALREADY done/sorted/paid,
+  "hotel_booked":       true ONLY if the user says their hotel is ALREADY booked/sorted/paid,
+  "transport_booked":   true ONLY if local transport is ALREADY arranged by them,
+  "attractions_booked": true ONLY if the user says they have ALREADY decided/planned/sorted their activities or attractions,
+  "requested_hotel":    "exact hotel name if user says 'Book this hotel X' or 'I want hotel X' or 'stay at X', else null"
 }
 
 Date rules:

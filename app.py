@@ -16,16 +16,25 @@ import streamlit as st
 
 
 def _configure_logging() -> None:
+    from src.ui.log_buffer import BufferHandler
+
     fmt = logging.Formatter(
         "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
         datefmt="%H:%M:%S",
     )
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(fmt)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(fmt)
+
+    buf_handler = BufferHandler()
+    buf_handler.setFormatter(fmt)
 
     root = logging.getLogger()
     if not root.handlers:
-        root.addHandler(handler)
+        root.addHandler(stdout_handler)
+    # Always add buffer handler if not already present
+    if not any(isinstance(h, BufferHandler) for h in root.handlers):
+        root.addHandler(buf_handler)
     root.setLevel(logging.INFO)
 
     # Silence noisy third-party loggers

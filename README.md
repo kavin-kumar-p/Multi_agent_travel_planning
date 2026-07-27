@@ -52,10 +52,10 @@ LLM:       Gemini (configurable per agent via .env)
 The coordinator uses a **Google ADK `LlmAgent`** — not hardcoded conditions. It creates an ADK `Runner` with an `InMemorySessionService`, sends the user's original query to the agent, and streams the events until `is_final_response()`. The agent returns a JSON routing decision:
 
 ```json
-{"flights": true, "attractions": true, "hotel": true, "transport": false, "reasoning": "..."}
+{"flights": true, "attractions": true, "hotel": true, "transport": false, "confirmed_hotel": "", "reasoning": "..."}
 ```
 
-Pre-booked items are always forced to `false`. If the ADK call fails, it falls back to condition-based logic.
+`confirmed_hotel` captures any specific hotel name the user named (e.g. "Book this hotel Hilton Tokyo"). Pre-booked items are always forced to `false` regardless of the LLM decision. If the ADK call fails, it falls back to running all agents the user did not explicitly confirm as already booked.
 
 ## How Agents Communicate with Each Other (True A2A)
 
@@ -63,15 +63,15 @@ Agents do **not** receive peer results from the coordinator. Instead, each agent
 
 | Calling agent | Tool name | Peer resolved at runtime | Asks | Gets back |
 |---|---|---|---|---|
-| Attractions | `call_peer_agent` | Flight Agent | "What are the confirmed travel dates?" | `confirmed_dates` |
 | Hotel | `call_peer_agent` | Attractions Agent | "Which areas are the attraction clusters?" | `clusters` list |
-| Transport | `call_peer_agent` | Flight Agent | "What are the confirmed travel dates?" | `confirmed_dates` |
 | Transport | `call_peer_agent` | Attractions Agent | "Which areas are the attraction clusters?" | `clusters` list |
 | Transport | `call_peer_agent` | Hotel Agent | "Where is the hotel located?" | `hotel_location` |
 
+Flight and Attractions agents call no peers — they run purely on RAG + their own MCP tools. Dates are passed directly from the coordinator in the request payload; no agent needs to peer-call Flight Agent for dates.
+
 Each agent has exactly one generic `call_peer_agent(agent_name, question)` tool. On first use the agent calls `GET /.well-known/agent.json` on all peer URLs to discover their names and descriptions (`AgentRegistry` in `src/a2a/registry.py`). The discovered names and descriptions are injected into the system prompt, and the LLM autonomously decides which peer to call and when — no developer hardcodes the dependency.
 
-Each agent is stateless — there is no in-process result cache. When a peer agent calls with a question, the receiving agent runs its full pipeline fresh (RAG search + LLM reasoning) to answer. This is the correct production pattern: stateless, independently scalable services where shared state lives in an external store (Redis, database) if needed, not in process memory.
+**Deduplication via TaskManager**: when two agents call the same peer with the same `session_id` (e.g. both Hotel and Transport call Attractions), the `TaskManager` in the receiving agent runs the pipeline only once — the second caller blocks on an `asyncio.Event` and receives the cached result when the first completes. This prevents redundant LLM calls and ensures both callers get identical results.
 
 ## What the Coordinator Passes to Each Agent
 
@@ -162,8 +162,9 @@ On first run the FAISS indexes are built from the `data/` JSON files and cached 
 ```
 ├── app.py                      # Streamlit entry point
 ├── prompts/                    # Prompt files (one .md per agent/role)
-│   ├── coordinator_routing.md  # ADK LlmAgent routing prompt
-│   ├── flight_agent.md         # system + autonomous_decision_making + user_template
+│   ├── coordinator_routing.md      # ADK LlmAgent routing prompt
+│   ├── coordinator_result_eval.md  # ADK LlmAgent result evaluation prompt (multi-turn retries)
+│   ├── flight_agent.md             # system + autonomous_decision_making + user_template
 │   ├── attractions_agent.md
 │   ├── hotel_agent.md
 │   └── transport_agent.md
@@ -182,10 +183,9 @@ On first run the FAISS indexes are built from the `data/` JSON files and cached 
 │   │   ├── attractions.py      # LangGraph create_react_agent — :8002
 │   │   ├── hotel.py            # CrewAI Crew + Agent          — :8003
 │   │   └── transport.py        # CrewAI Crew + Agent          — :8004
-│   ├── a2a/                    # Google A2A protocol layer
-│   │   ├── client.py           # A2AClient — typed HTTP client
-│   │   ├── server.py           # create_agent_app() factory
-│   │   ├── models.py           # Pydantic v2 A2A message/task models
+│   ├── a2a/                    # Google A2A protocol layer (official a2a-sdk v1.1+)
+│   │   ├── client.py           # A2AClient — JsonRpcTransport wrapper
+│   │   ├── server.py           # create_agent_app() — FastAPI + SDK route injection
 │   │   ├── registry.py         # AgentRegistry — discovers peers via AgentCard, caches name→URL
 │   │   └── launch.py           # AgentServerManager (uvicorn subprocesses)
 │   ├── config/
@@ -252,7 +252,7 @@ Each agent exposes three endpoints following the [Google A2A spec](https://googl
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/.well-known/agent.json` | GET | AgentCard discovery |
-| `/health` | GET | Health check |
-| `/send_message` | POST | JSON-RPC 2.0 task submission |
+| `/health` | GET | Health check (responds immediately, even during RAG loading) |
+| `/` | POST | JSON-RPC 2.0 task submission (official a2a-sdk v1.1+ route) |
 
 The coordinator discovers all agents at startup via `GET /.well-known/agent.json` and `GET /health`, then fires all needed agents **in parallel** via `POST /send_message`. Agents call each other using the same endpoint — each agent carries a single generic `call_peer_agent(agent_name, question)` tool registered in its LangGraph or CrewAI toolset. At runtime `AgentRegistry` (`src/a2a/registry.py`) resolves `agent_name` to the correct peer URL by fetching AgentCards from all candidate peers and matching by name.

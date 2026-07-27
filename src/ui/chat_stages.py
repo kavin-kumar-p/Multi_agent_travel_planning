@@ -18,7 +18,7 @@ _ALL_ROWS = [
     ("attractions", "Attractions"),
     ("transport",   "Transport"),
 ]
-_LABELS = {"flights": "Flights", "hotel": "Hotel", "transport": "Transport"}
+_LABELS = {"flights": "Flights", "hotel": "Hotel", "attractions": "Attractions", "transport": "Transport"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ def _user(text: str) -> None:
 
 def _go_to_budget_setup() -> None:
     confirmed = st.session_state.confirmed_booked
-    booked_keys = [k for k in ("flights", "hotel", "transport") if confirmed.get(k)]
+    booked_keys = [k for k in ("flights", "hotel", "attractions", "transport") if confirmed.get(k)]
     st.session_state.budget_setup_step = "deduct_q" if booked_keys else "split"
     st.session_state.stage = "budget_setup"
 
@@ -82,17 +82,22 @@ def _start_planning_thread(rag_stores: dict) -> None:
         interests=info.get("interests") or [],
         user_query=user_query,
         budget_split=budget_split,
+        confirmed_booked=st.session_state.get("confirmed_booked", {}),
+        requested_hotel=info.get("requested_hotel") or "",
     )
 
     trace_sink  = st.session_state.trace_sink
     result_box  = st.session_state.result_box
+
+    _ui_session_id = st.runtime.scriptrunner.get_script_run_ctx().session_id
 
     def _worker():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             result = loop.run_until_complete(
-                coordinator_run(request, rag_stores, trace_sink=trace_sink)
+                coordinator_run(request, rag_stores, trace_sink=trace_sink,
+                                user_id=_ui_session_id)
             )
             result_box["result"] = result
         except Exception as exc:
@@ -146,9 +151,10 @@ def _stage_input() -> None:
         st.session_state.info = info
 
         booked = {
-            "flights":   bool(info.get("flight_booked")),
-            "hotel":     bool(info.get("hotel_booked")),
-            "transport": bool(info.get("transport_booked")),
+            "flights":     bool(info.get("flight_booked")),
+            "hotel":       bool(info.get("hotel_booked")),
+            "transport":   bool(info.get("transport_booked")),
+            "attractions": bool(info.get("attractions_booked")),
         }
         st.session_state.booked = booked
         st.session_state.confirmed_booked = dict(booked)
@@ -222,7 +228,7 @@ def _stage_budget_setup() -> None:
     step = st.session_state.budget_setup_step
 
     confirmed  = st.session_state.confirmed_booked
-    booked_keys = [k for k in ("flights", "hotel", "transport") if confirmed.get(k)]
+    booked_keys = [k for k in ("flights", "hotel", "attractions", "transport") if confirmed.get(k)]
     total       = st.session_state.total_budget or 0.0
 
     # ── Sub-step: deduct_q ────────────────────────────────────────────────────
@@ -448,7 +454,7 @@ def _stage_summary(rag_stores: dict) -> None:
     info        = st.session_state.info
     p_budget    = st.session_state.planning_budget or st.session_state.total_budget or 0
     confirmed   = st.session_state.confirmed_booked
-    booked_lbls = [_LABELS[k] for k in ("flights", "hotel", "transport") if confirmed.get(k)]
+    booked_lbls = [_LABELS[k] for k in ("flights", "hotel", "attractions", "transport") if confirmed.get(k)]
 
     origin   = info.get("origin") or "Not specified"
     dest     = info.get("destination") or "Not specified"
@@ -484,6 +490,8 @@ def _stage_summary(rag_stores: dict) -> None:
         _assistant(summary)
         _user("Yes, let's start planning!")
         # Reset planning state
+        from src.ui.log_buffer import clear as _clear_logs
+        _clear_logs()
         st.session_state.trace_sink     = []
         st.session_state.result_box     = {}
         st.session_state.planning_thread = None

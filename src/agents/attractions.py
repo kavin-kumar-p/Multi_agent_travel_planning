@@ -19,7 +19,7 @@ import os
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from src.a2a.models import AgentCapabilities, AgentCard
+from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 from src.a2a.server import create_agent_app
 from src.config.constants import ALL_AGENT_URLS, ATTRACTIONS_URL
 from src.a2a.registry import AgentRegistry
@@ -51,8 +51,11 @@ CARD = AgentCard(
         "Calls peer agents via A2A when it needs context (e.g. confirmed dates from Flight Agent). "
         "Tools: search_destinations, search_preferences, search_previous_itineraries, call_peer_agent."
     ),
-    url=ATTRACTIONS_URL,
+    supported_interfaces=[AgentInterface(url=ATTRACTIONS_URL)],
+    version="1.0.0",
     capabilities=AgentCapabilities(),
+    default_input_modes=["text", "data"],
+    default_output_modes=["data"],
 )
 
 
@@ -92,6 +95,7 @@ async def _handle(input_data: dict) -> dict:
         user_msg = _p["user_template"].format(
             destination=destination,
             confirmed_dates=f"{start_date} to {end_date}",
+            num_days=input_data.get("num_days", ""),
             interests=interests or "general sightseeing",
             budget_cap=context.get("budget_cap", 0),
         ) if destination else f"{text}\n\nRequest context: {json.dumps(context)}"
@@ -133,6 +137,7 @@ async def _handle(input_data: dict) -> dict:
                 _registry, session_id,
                 extra_data={"start_date": start_date, "end_date": end_date},
                 peer_call_log=peer_call_log,
+                caller=CARD.name,
             ),
         ]
 

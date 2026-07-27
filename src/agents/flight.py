@@ -18,7 +18,7 @@ import os
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from src.a2a.models import AgentCapabilities, AgentCard
+from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 from src.a2a.server import create_agent_app
 from src.config.constants import FLIGHT_URL
 from src.config.settings import settings
@@ -48,8 +48,11 @@ CARD = AgentCard(
         "Runs a full flight search for every request — coordinator task or peer query. "
         "Tools: search_travel_policies, search_available_flights."
     ),
-    url=FLIGHT_URL,
+    supported_interfaces=[AgentInterface(url=FLIGHT_URL)],
+    version="1.0.0",
     capabilities=AgentCapabilities(),
+    default_input_modes=["text", "data"],
+    default_output_modes=["data"],
 )
 
 

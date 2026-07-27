@@ -19,7 +19,7 @@ import os
 
 from crewai import Agent as CrewAgent, Crew, LLM as CrewLLM, Task as CrewTask
 
-from src.a2a.models import AgentCapabilities, AgentCard
+from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 from src.a2a.server import create_agent_app
 from src.a2a.registry import AgentRegistry
 from src.config.constants import (
@@ -61,8 +61,11 @@ CARD = AgentCard(
         "Tools: search_destination_transport, search_available_transit, "
         "call_peer_agent."
     ),
-    url=TRANSPORT_URL,
+    supported_interfaces=[AgentInterface(url=TRANSPORT_URL)],
+    version="1.0.0",
     capabilities=AgentCapabilities(),
+    default_input_modes=["text", "data"],
+    default_output_modes=["data"],
 )
 
 
@@ -79,11 +82,16 @@ async def _startup() -> None:
 
 
 async def _handle(input_data: dict) -> dict:
-    session_id  = input_data.get("session_id", "default")
-    destination = input_data.get("destination", "")
-    start_date  = input_data.get("start_date", "")
-    end_date    = input_data.get("end_date", "")
-    budget_cap  = float(input_data.get("budget_cap", 0))
+    session_id     = input_data.get("session_id", "default")
+    destination    = input_data.get("destination", "")
+    start_date     = input_data.get("start_date", "")
+    end_date       = input_data.get("end_date", "")
+    budget_cap     = float(input_data.get("budget_cap", 0))
+    skipped_agents = list(input_data.get("skipped_agents", []))
+    if input_data.get("attractions_decided") and "attractions" not in skipped_agents:
+        skipped_agents.append("attractions")
+    if input_data.get("hotel_decided") and "hotel" not in skipped_agents:
+        skipped_agents.append("hotel")
 
     fallback: dict = {"airport_transfer": {}, "daily_transit": {}, "total_cost": 0, "tips": []}
 
@@ -101,12 +109,30 @@ async def _handle(input_data: dict) -> dict:
             + _p["autonomous_decision_making"].format(budget_cap=f"{budget_cap:.2f}")
         )
 
+        if skipped_agents:
+            system += (
+                f"\n\nSkipped agents (DO NOT call these via call_peer_agent — "
+                f"they were not invoked this session): {', '.join(skipped_agents)}. "
+                "If attractions is skipped, plan routes using the destination city centre. "
+                "If hotel is skipped, use the destination city centre as the hotel location."
+            )
+
         text    = input_data.get("_text", "")
         context = {k: v for k, v in input_data.items() if k != "_text"}
+        hotel_hint = (
+            "[hotel agent skipped — use destination city centre as base location]"
+            if "hotel" in skipped_agents
+            else "[will be fetched from Hotel Agent via A2A]"
+        )
+        clusters_hint = (
+            "[attractions agent skipped — plan routes using the destination city centre]"
+            if "attractions" in skipped_agents
+            else "[will be fetched from Attractions Agent via A2A]"
+        )
         user_msg = _p["user_template"].format(
             destination=destination,
-            hotel_location="[will be fetched from Hotel Agent via A2A]",
-            attraction_clusters="[will be fetched from Attractions Agent via A2A]",
+            hotel_location=hotel_hint,
+            attraction_clusters=clusters_hint,
             confirmed_dates=f"{start_date} to {end_date}",
             budget_cap=budget_cap,
         ) if destination else f"{text}\n\nRequest context: {json.dumps(context)}"
@@ -137,6 +163,7 @@ async def _handle(input_data: dict) -> dict:
                 _registry, session_id,
                 extra_data={"start_date": start_date, "end_date": end_date, "destination": destination},
                 peer_call_log=peer_call_log,
+                caller=CARD.name,
             ),
         ]
 

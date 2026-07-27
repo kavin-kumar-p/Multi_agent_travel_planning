@@ -74,7 +74,7 @@ class AgentServerManager:
                 ],
                 cwd=str(_PROJECT_ROOT),
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=None,  # inherit parent stderr so crashes are visible
             )
             self._procs[name] = proc
 

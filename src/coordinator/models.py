@@ -19,3 +19,5 @@ class TravelRequest:
     interests: list[str] = field(default_factory=list)
     user_query: str = ""
     budget_split: dict | None = None
+    confirmed_booked: dict = field(default_factory=dict)
+    requested_hotel: str = ""
