@@ -1,9 +1,10 @@
-"""Coordinator — Google A2A protocol orchestration.
+"""Coordinator — Google ADK routing + A2A protocol orchestration.
 
 Architecture:
-  Coordinator (this module)
-  ├── Phase 1: discovers agents via GET /.well-known/agent.json + GET /health
-  └── Phase 2: triggers all needed agents in PARALLEL via POST /send_message
+  Coordinator (this module, powered by Google ADK LlmAgent)
+  ├── Phase 1: ADK LlmAgent reads user query and decides which agents to invoke
+  ├── Phase 2: discovers agents via GET /.well-known/agent.json + GET /health
+  └── Phase 3: triggers all needed agents in PARALLEL via POST /send_message
 
 A2A agent services (all fired simultaneously):
   Flight Agent      http://127.0.0.1:8001  (LangGraph)
@@ -13,8 +14,8 @@ A2A agent services (all fired simultaneously):
 
 Each agent is autonomous — it calls peer agents directly via A2A when it
 needs enrichment data:
-  Attractions → asks Flight      (query_type="date_confirmation")
-  Hotel       → asks Attractions (query_type="cluster_areas")
+  Attractions → asks Flight      (confirmed dates)
+  Hotel       → asks Attractions (cluster areas)
   Transport   → asks Flight + Attractions + Hotel in parallel
 
 The coordinator passes only the original request fields + session_id.
@@ -28,7 +29,11 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from langchain_core.messages import HumanMessage
+from google import genai as google_genai
+from google.adk.agents import LlmAgent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types as genai_types
 
 from src.a2a.client import A2AClient
 from src.a2a.launch import all_agent_urls
@@ -36,7 +41,6 @@ from src.config.constants import DEFAULT_BUDGET_SPLIT, RETRY_CAP_FACTOR
 from src.config.settings import settings
 from src.coordinator.models import TravelRequest
 from src.coordinator.session import TravelSession
-from src.llm.factory import get_llm
 from src.prompts import load_prompt
 from src.utils.coordinator_helpers import (
     assemble,
@@ -51,6 +55,10 @@ logger = logging.getLogger(__name__)
 if settings.google_api_key:
     os.environ.setdefault("GOOGLE_API_KEY", settings.google_api_key)
 
+# Shared in-memory session service — survives across requests, resets on process restart
+_adk_sessions = InMemorySessionService()
+_adk_user_sessions: dict[str, str] = {}  # user_id → session_id
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -61,37 +69,58 @@ def _trace(trace_sink, agent: str, status: str, **extra) -> None:
         trace_sink.append({"agent": agent, "status": status, "ts": _now(), **extra})
 
 
-async def _llm_decide_agents(request: TravelRequest) -> dict[str, bool]:
+async def _llm_decide_agents(request: TravelRequest, agent_cards: str, user_id: str = "default") -> tuple[dict[str, bool], str]:
     """
-    LLM reads the user's original chat query and decides which agents to invoke.
-    Falls back to condition-based needed_agents() if the LLM call fails.
-    Pre-booked items are always forced to False regardless of LLM output.
+    Google ADK LlmAgent reads the discovered AgentCards + user query and decides
+    which agents to invoke. Falls back to running all agents if the ADK call fails.
     """
-    pre_booked = {
-        "flights":   request.confirmed_flight is not None,
-        "hotel":     request.confirmed_hotel is not None,
-        "transport": request.confirmed_transport is not None,
-    }
     _p = load_prompt("coordinator_routing")
-    prompt = (
-        _p["system"] + "\n\n"
-        + _p["user_template"].format(
-            user_query=request.user_query or "Plan my trip",
-            origin=request.origin,
-            destination=request.destination,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            total_budget=f"{request.total_budget:.0f}",
-            interests=", ".join(request.interests) or "general sightseeing",
-            flights_booked=pre_booked["flights"],
-            hotel_booked=pre_booked["hotel"],
-            transport_booked=pre_booked["transport"],
-        )
+    system_instruction = _p["system"]
+    user_message = _p["user_template"].format(
+        agent_cards=agent_cards,
+        user_query=request.user_query or "Plan my trip",
+        origin=request.origin,
+        destination=request.destination,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        total_budget=f"{request.total_budget:.0f}",
+        interests=", ".join(request.interests) or "general sightseeing",
     )
+
     try:
-        llm = get_llm(settings.coordinator_model, temperature=0.0)
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
-        content = response.content.strip()
+        routing_agent = LlmAgent(
+            name="coordinator_router",
+            model=settings.coordinator_model,
+            instruction=system_instruction,
+            generate_content_config=genai_types.GenerateContentConfig(temperature=0.0),
+        )
+        if user_id not in _adk_user_sessions:
+            s = await _adk_sessions.create_session(app_name="coordinator", user_id=user_id)
+            _adk_user_sessions[user_id] = s.id
+        runner = Runner(
+            agent=routing_agent,
+            session_service=_adk_sessions,
+            app_name="coordinator",
+        )
+        session = await _adk_sessions.get_session(
+            app_name="coordinator", user_id=user_id, session_id=_adk_user_sessions[user_id]
+        )
+
+        final_text = ""
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session.id,
+            new_message=genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=user_message)],
+            ),
+        ):
+            if event.is_final_response() and event.content:
+                for part in (event.content.parts or []):
+                    if hasattr(part, "text") and part.text:
+                        final_text += part.text
+
+        content = final_text.strip()
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -100,25 +129,96 @@ async def _llm_decide_agents(request: TravelRequest) -> dict[str, bool]:
 
         needed = {k: bool(decision.get(k, True))
                   for k in ("flights", "attractions", "hotel", "transport")}
-        # Hard override — pre-booked items are never invoked
-        for k, booked in pre_booked.items():
-            if booked:
-                needed[k] = False
+        confirmed_hotel = decision.get("confirmed_hotel", "") or ""
+        logger.info("ADK routing: %s | confirmed_hotel: %r | reason: %s",
+                    needed, confirmed_hotel, decision.get("reasoning", ""))
+        return needed, confirmed_hotel
 
-        logger.info("LLM routing: %s | reason: %s", needed, decision.get("reasoning", ""))
-        return needed
     except Exception as exc:
-        logger.warning("LLM routing failed (%s) — using condition-based fallback", exc)
-        return needed_agents(request)
+        logger.warning("ADK routing failed (%s) — running all agents", exc)
+        return {"flights": True, "attractions": True, "hotel": True, "transport": True}, ""
 
 
-async def _discover_agents() -> dict[str, str]:
+async def _llm_evaluate_results(
+    request: TravelRequest,
+    results: dict[str, dict | None],
+    needed: dict[str, bool],
+    turn: int,
+    user_id: str = "default",
+) -> dict[str, dict]:
+    """
+    LLM reads all agent results and decides which are unsatisfactory.
+    Returns {agent: {ok: bool, feedback: str}} for every needed agent.
+    Falls back to marking all ok to avoid infinite retries on LLM failure.
+    """
+    _p = load_prompt("coordinator_result_eval")
+    results_for_eval = {k: v for k, v in results.items() if needed.get(k)}
+    user_message = _p["user_template"].format(
+        destination=request.destination,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        interests=", ".join(request.interests) or "general sightseeing",
+        total_budget=f"{request.total_budget:.0f}",
+        turn=turn + 1,
+        results_json=json.dumps(results_for_eval, indent=2),
+    )
+
+    try:
+        eval_agent = LlmAgent(
+            name="coordinator_evaluator",
+            model=settings.coordinator_model,
+            instruction=_p["system"],
+            generate_content_config=genai_types.GenerateContentConfig(temperature=0.0),
+        )
+        if user_id not in _adk_user_sessions:
+            s = await _adk_sessions.create_session(app_name="coordinator", user_id=user_id)
+            _adk_user_sessions[user_id] = s.id
+        runner = Runner(
+            agent=eval_agent,
+            session_service=_adk_sessions,
+            app_name="coordinator",
+        )
+        session = await _adk_sessions.get_session(
+            app_name="coordinator", user_id=user_id, session_id=_adk_user_sessions[user_id]
+        )
+
+        final_text = ""
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session.id,
+            new_message=genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=user_message)],
+            ),
+        ):
+            if event.is_final_response() and event.content:
+                for part in (event.content.parts or []):
+                    if hasattr(part, "text") and part.text:
+                        final_text += part.text
+
+        content = final_text.strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        evaluation = json.loads(content.strip())
+        logger.info("LLM result evaluation (turn %d): %s", turn + 1, evaluation)
+        return evaluation
+
+    except Exception as exc:
+        logger.warning("LLM result evaluation failed (%s) — treating all results as ok", exc)
+        return {k: {"ok": True, "feedback": ""} for k in ("flights", "attractions", "hotel", "transport")}
+
+
+async def _discover_agents() -> tuple[dict[str, str], str]:
     """
     A2A Phase 1 — discover all agents via AgentCard and verify health.
-    Returns a dict of name → url for healthy agents.
+    Returns (healthy_urls, agent_cards_text) where agent_cards_text is
+    formatted card descriptions ready to inject into the routing LLM prompt.
     """
     urls = all_agent_urls()
     healthy: dict[str, str] = {}
+    card_lines: list[str] = []
 
     async def _check(name: str, url: str) -> None:
         client = A2AClient(url)
@@ -129,29 +229,59 @@ async def _discover_agents() -> dict[str, str]:
             logger.info("A2A discovery: %s (%s) — %s", card.name, url, status)
             if ok:
                 healthy[name] = url
+                card_lines.append(f"- {card.name} (key: {name}): {card.description}")
         except Exception as exc:
             logger.warning("A2A discovery failed for '%s' at %s: %s", name, url, exc)
 
     await asyncio.gather(*[_check(n, u) for n, u in urls.items()])
-    return healthy
+    agent_cards_text = "\n".join(card_lines) if card_lines else "No agents discovered."
+    return healthy, agent_cards_text
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict:
+async def run(request: TravelRequest, rag_stores: dict, trace_sink=None, user_id: str = "default") -> dict:
     """
     Orchestrate the full travel planning pipeline via A2A HTTP calls.
 
     rag_stores is accepted for interface compatibility (agent servers load
     their own RAG stores on startup; coordinator does not need them).
     """
-    issues = validate(request)
-    if issues:
-        logger.warning("Validation failed: %s", issues)
-        return {"status": "incomplete", "missing_fields": issues}
-
     session = TravelSession(total_budget=request.total_budget)
-    needed  = await _llm_decide_agents(request)
+
+    # ── A2A Phase 1: discover agents via AgentCard + health check ─────────────
+    healthy, agent_cards = await _discover_agents()
+    logger.info("Healthy A2A agents: %s", list(healthy))
+
+    # ── A2A Phase 2: LLM reads discovered AgentCards to decide routing ────────
+    needed, confirmed_hotel = await _llm_decide_agents(request, agent_cards, user_id=user_id)
+
+    # confirmed_booked is authoritative — user explicitly stated these are already done,
+    # so override whatever the LLM decided for those agents
+    logger.info("Pre-override needed: %s | confirmed_booked: %s", needed, request.confirmed_booked)
+    for key, booked in (request.confirmed_booked or {}).items():
+        if booked and key in needed:
+            needed[key] = False
+            logger.info("Routing override: skipping '%s' agent (user confirmed already booked)", key)
+
+    # Safety net — if all agents ended up False (LLM confusion or over-eager override),
+    # recover by running every agent that the user did NOT explicitly confirm as booked.
+    if not any(needed.values()):
+        logger.warning(
+            "All agents were skipped after routing+override — recovering. "
+            "Running agents not in confirmed_booked."
+        )
+        confirmed = request.confirmed_booked or {}
+        for key in needed:
+            needed[key] = not confirmed.get(key, False)
+
+    logger.info("Final routing decision: %s", needed)
+
+    # Re-validate with routing context — origin not required if Flight Agent skipped
+    issues = validate(request, needed)
+    if issues:
+        logger.warning("Validation failed (post-routing): %s", issues)
+        return {"status": "incomplete", "missing_fields": issues}
     budget_split = request.budget_split or DEFAULT_BUDGET_SPLIT
     session.per_agent_caps = split_budget(request.total_budget, needed, budget_split)
     caps    = session.per_agent_caps
@@ -162,44 +292,41 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
         request.total_budget, [k for k, v in needed.items() if v], caps,
     )
 
-    # ── A2A Phase 1: agent discovery + health check ───────────────────────────
-    healthy = await _discover_agents()
-    logger.info("Healthy A2A agents: %s", list(healthy))
-
     def _client(name: str) -> A2AClient:
-        url = all_agent_urls()[name]
+        url = healthy.get(name) or all_agent_urls()[name]
         return A2AClient(url)
 
     session_id = session.session_id
 
-    # ── Pre-populate skipped (pre-booked) agents ──────────────────────────────
-    flight_result: dict | None = None
-    if not needed["flights"]:
-        flight_result = {**request.confirmed_flight, "_skipped": True}
-        _trace(trace_sink, "flights", "skipped")
-
-    hotel_result: dict | None = None
-    if not needed["hotel"]:
-        hotel_result = {"recommended_hotel": request.confirmed_hotel, "_skipped": True}
-        _trace(trace_sink, "hotel", "skipped")
-
+    flight_result:    dict | None = None
+    hotel_result:     dict | None = None
     transport_result: dict | None = None
-    if not needed["transport"]:
-        transport_result = {**request.confirmed_transport, "_skipped": True}
-        _trace(trace_sink, "transport", "skipped")
 
     # ── A2A Phase 2: parallel task submission ────────────────────────────────
     # All needed agents are fired simultaneously. Each agent is autonomous —
     # it calls peer agents directly via A2A when it needs enrichment data.
     # The coordinator passes only original request fields + session_id.
 
+    # skipped_agents tells each agent which peers were bypassed by routing,
+    # so they don't make a peer call that would restart a skipped pipeline.
+    skipped_agents = [k for k, v in needed.items() if not v]
+
+    from datetime import date
+    _num_days = (
+        (date.fromisoformat(request.end_date) - date.fromisoformat(request.start_date)).days + 1
+        if request.start_date and request.end_date else 0
+    )
+
     _base = {
-        "origin":      request.origin,
-        "destination": request.destination,
-        "start_date":  request.start_date,
-        "end_date":    request.end_date,
-        "interests":   request.interests,
-        "session_id":  session_id,
+        "origin":          request.origin,
+        "destination":     request.destination,
+        "start_date":      request.start_date,
+        "end_date":        request.end_date,
+        "num_days":        _num_days,
+        "interests":       request.interests,
+        "session_id":      session_id,
+        "skipped_agents":  skipped_agents,
+        "requested_hotel": request.requested_hotel,
     }
 
     async def _call_flights() -> dict:
@@ -213,7 +340,10 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             data={**_base, "budget_cap": caps.get("flights", 0)},
             session_id=session_id,
         )
-        _trace(trace_sink, "flights", "done", cost=result.get("cost", 0))
+        _trace(trace_sink, "flights", "done",
+               cost=result.get("cost", 0),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Flight A2A done — cost=$%s", result.get("cost"))
         return result
 
@@ -228,7 +358,10 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             session_id=session_id,
         )
         _trace(trace_sink, "attractions", "done",
-               clusters=len(result.get("clusters", [])))
+               cost=result.get("total_cost", 0),
+               clusters=len(result.get("clusters", [])),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Attractions A2A done — clusters=%d", len(result.get("clusters", [])))
         return result
 
@@ -243,8 +376,12 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             data={**_base, "budget_cap": caps.get("hotel", 0)},
             session_id=session_id,
         )
+        hotel_cost = result.get("recommended_hotel", {}).get("total_cost", 0)
         _trace(trace_sink, "hotel", "done",
-               name=result.get("recommended_hotel", {}).get("name", ""))
+               cost=hotel_cost,
+               name=result.get("recommended_hotel", {}).get("name", ""),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Hotel A2A done — %s",
                     result.get("recommended_hotel", {}).get("name"))
         return result
@@ -259,32 +396,183 @@ async def run(request: TravelRequest, rag_stores: dict, trace_sink=None) -> dict
             data={**_base, "budget_cap": caps.get("transport", 0)},
             session_id=session_id,
         )
-        _trace(trace_sink, "transport", "done", cost=result.get("total_cost", 0))
+        _trace(trace_sink, "transport", "done",
+               cost=result.get("total_cost", 0),
+               tokens=result.pop("_token_usage", 0),
+               peer_calls=result.pop("_peer_calls", []))
         logger.info("Transport A2A done — cost=$%s", result.get("total_cost"))
         return result
 
-    # Build the task list — skip pre-booked agents
-    agent_tasks: list = []
-    agent_names: list[str] = []
+    # ── Multi-turn agent loop ────────────────────────────────────────────────
+    # Round 0: fire all needed agents in parallel.
+    # After each round the coordinator LLM evaluates every result.
+    # Agents whose result is unsatisfactory are re-called with LLM feedback
+    # until all pass or settings.agent_max_retries is exhausted.
+    # Each retry uses a turn-scoped session_id so the agent's TaskManager
+    # treats it as a fresh request rather than returning the cached result.
 
-    if needed["flights"]:
-        agent_tasks.append(_call_flights())
-        agent_names.append("flights")
+    live_results: dict[str, dict | None] = {}
 
-    agent_tasks.append(_call_attractions())
-    agent_names.append("attractions")
+    for turn in range(settings.agent_max_retries + 1):
+        # Build the task list for this turn — only agents still pending
+        agent_tasks: list = []
+        agent_names: list[str] = []
+        pending_feedback: dict[str, str] = getattr(_llm_evaluate_results, "_pending_feedback", {})
 
-    if needed["hotel"]:
-        agent_tasks.append(_call_hotel())
-        agent_names.append("hotel")
+        if needed["flights"] and (turn == 0 or not live_results.get("flights")):
+            feedback = pending_feedback.get("flights", "")
+            async def _call_flights(fb: str = feedback, t: int = turn) -> dict:
+                _trace(trace_sink, "flights", "running")
+                turn_sid = f"{session_id}_flights_t{t}" if t > 0 else session_id
+                user_context = (
+                    f" User's original request (may contain airline/class preferences): "
+                    f"{request.user_query}"
+                ) if request.user_query else ""
+                text = (
+                    fb if fb else
+                    f"Search for the best flight from {request.origin} to "
+                    f"{request.destination} between {request.start_date} and "
+                    f"{request.end_date} within budget ${caps.get('flights', 0):.2f}."
+                    f"{user_context}"
+                )
+                result = await _client("flights").send_message(
+                    text=text,
+                    data={**_base, "budget_cap": caps.get("flights", 0), "session_id": turn_sid},
+                    session_id=turn_sid,
+                )
+                _trace(trace_sink, "flights", "done",
+                       cost=result.get("cost", 0),
+                       tokens=result.pop("_token_usage", 0),
+                       peer_calls=result.pop("_peer_calls", []))
+                logger.info("Flight A2A done (turn %d) — cost=$%s", t, result.get("cost"))
+                return result
+            agent_tasks.append(_call_flights())
+            agent_names.append("flights")
 
-    if needed["transport"]:
-        agent_tasks.append(_call_transport())
-        agent_names.append("transport")
+        if needed["attractions"] and (turn == 0 or not live_results.get("attractions")):
+            feedback = pending_feedback.get("attractions", "")
+            async def _call_attractions(fb: str = feedback, t: int = turn) -> dict:
+                _trace(trace_sink, "attractions", "running")
+                turn_sid = f"{session_id}_attractions_t{t}" if t > 0 else session_id
+                user_context = (
+                    f" User's original request (may contain specific places or must-see attractions): "
+                    f"{request.user_query}"
+                ) if request.user_query else ""
+                text = (
+                    fb if fb else
+                    f"Plan a day-by-day attractions itinerary for {request.destination} "
+                    f"matching interests: {', '.join(request.interests) or 'general sightseeing'}."
+                    f"{user_context}"
+                )
+                result = await _client("attractions").send_message(
+                    text=text,
+                    data={**_base, "budget_cap": caps.get("attractions", 0), "session_id": turn_sid},
+                    session_id=turn_sid,
+                )
+                _trace(trace_sink, "attractions", "done",
+                       cost=result.get("total_cost", 0),
+                       clusters=len(result.get("clusters", [])),
+                       tokens=result.pop("_token_usage", 0),
+                       peer_calls=result.pop("_peer_calls", []))
+                logger.info("Attractions A2A done (turn %d) — clusters=%d", t, len(result.get("clusters", [])))
+                return result
+            agent_tasks.append(_call_attractions())
+            agent_names.append("attractions")
 
-    # Fire all in parallel — agents call each other directly via A2A as needed
-    task_outputs = await asyncio.gather(*agent_tasks)
-    live_results = dict(zip(agent_names, task_outputs))
+        if needed["hotel"] and (turn == 0 or not live_results.get("hotel")):
+            feedback = pending_feedback.get("hotel", "")
+            async def _call_hotel(fb: str = feedback, t: int = turn) -> dict:
+                _trace(trace_sink, "hotel", "running")
+                turn_sid = f"{session_id}_hotel_t{t}" if t > 0 else session_id
+                user_context = (
+                    f" User's original request (may contain attraction area details): "
+                    f"{request.user_query}"
+                ) if request.user_query else ""
+                text = (
+                    fb if fb else
+                    f"Select the best hotel in {request.destination} "
+                    f"near the planned attraction clusters within budget "
+                    f"${caps.get('hotel', 0):.2f}.{user_context}"
+                )
+                result = await _client("hotel").send_message(
+                    text=text,
+                    data={**_base, "budget_cap": caps.get("hotel", 0), "session_id": turn_sid,
+                          "attractions_decided": not needed.get("attractions", True),
+                          "confirmed_hotel": confirmed_hotel},
+                    session_id=turn_sid,
+                )
+                hotel_cost = result.get("recommended_hotel", {}).get("total_cost", 0)
+                _trace(trace_sink, "hotel", "done",
+                       cost=hotel_cost,
+                       name=result.get("recommended_hotel", {}).get("name", ""),
+                       tokens=result.pop("_token_usage", 0),
+                       peer_calls=result.pop("_peer_calls", []))
+                logger.info("Hotel A2A done (turn %d) — %s", t, result.get("recommended_hotel", {}).get("name"))
+                return result
+            agent_tasks.append(_call_hotel())
+            agent_names.append("hotel")
+
+        if needed["transport"] and (turn == 0 or not live_results.get("transport")):
+            feedback = pending_feedback.get("transport", "")
+            async def _call_transport(fb: str = feedback, t: int = turn) -> dict:
+                _trace(trace_sink, "transport", "running")
+                turn_sid = f"{session_id}_transport_t{t}" if t > 0 else session_id
+                user_context = (
+                    f" User's original request (may contain hotel/attraction details): "
+                    f"{request.user_query}"
+                ) if request.user_query else ""
+                text = (
+                    fb if fb else
+                    f"Arrange airport transfers and daily transit for "
+                    f"{request.destination} within budget ${caps.get('transport', 0):.2f}."
+                    f"{user_context}"
+                )
+                result = await _client("transport").send_message(
+                    text=text,
+                    data={**_base, "budget_cap": caps.get("transport", 0), "session_id": turn_sid,
+                          "attractions_decided": not needed.get("attractions", True),
+                          "hotel_decided": not needed.get("hotel", True)},
+                    session_id=turn_sid,
+                )
+                _trace(trace_sink, "transport", "done",
+                       cost=result.get("total_cost", 0),
+                       tokens=result.pop("_token_usage", 0),
+                       peer_calls=result.pop("_peer_calls", []))
+                logger.info("Transport A2A done (turn %d) — cost=$%s", t, result.get("total_cost"))
+                return result
+            agent_tasks.append(_call_transport())
+            agent_names.append("transport")
+
+        if not agent_tasks:
+            break  # all agents already satisfied
+
+        # Fire pending agents in parallel
+        turn_outputs = await asyncio.gather(*agent_tasks)
+        for name, result in zip(agent_names, turn_outputs):
+            live_results[name] = result
+
+        # Last turn — skip evaluation to avoid an extra LLM call
+        if turn == settings.agent_max_retries:
+            break
+
+        # LLM evaluates all results and decides which need a retry
+        evaluation = await _llm_evaluate_results(request, live_results, needed, turn, user_id=user_id)
+
+        next_feedback: dict[str, str] = {}
+        all_ok = True
+        for agent, verdict in evaluation.items():
+            if not verdict.get("ok") and needed.get(agent):
+                all_ok = False
+                next_feedback[agent] = verdict.get("feedback", "")
+                live_results[agent] = None  # mark for re-call next turn
+                logger.info("LLM flagged '%s' for retry (turn %d): %s", agent, turn + 1, verdict.get("feedback"))
+
+        if all_ok:
+            logger.info("All agent results satisfactory after turn %d", turn + 1)
+            break
+
+        # Store feedback so the next turn's closures pick it up
+        _llm_evaluate_results._pending_feedback = next_feedback  # type: ignore[attr-defined]
 
     flight_result      = live_results.get("flights",     flight_result)
     attractions_result = live_results.get("attractions")

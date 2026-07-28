@@ -1,4 +1,4 @@
 from src.coordinator.coordinator import run
-from src.coordinator.models import AgentContext, TravelRequest
+from src.coordinator.models import TravelRequest
 
-__all__ = ["AgentContext", "TravelRequest", "run"]
+__all__ = ["TravelRequest", "run"]

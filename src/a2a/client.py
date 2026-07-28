@@ -1,4 +1,4 @@
-"""A2AClient — HTTP client for calling A2A agent servers.
+"""A2A client — official a2a-sdk v1.1+ (create_client + minimal_agent_card).
 
 Usage:
     client = A2AClient("http://127.0.0.1:8001")
@@ -12,50 +12,48 @@ import logging
 import uuid
 
 import httpx
+from google.protobuf import json_format, struct_pb2
+
+from a2a.client import A2ACardResolver
+from a2a.client.client import ClientCallContext, ClientConfig
+from a2a.client.client_factory import create_client, minimal_agent_card
+from a2a.types import (
+    AgentCard,
+    Message,
+    Part,
+    Role,
+    SendMessageRequest,
+)
+from a2a.utils.constants import PROTOCOL_VERSION_1_0, VERSION_HEADER, TransportProtocol
 
 from src.config.constants import CARD_TIMEOUT, HEALTH_TIMEOUT, SEND_TIMEOUT
-from src.a2a.models import (
-    AgentCard,
-    Artifact,
-    DataPart,
-    Message,
-    MessageSendParams,
-    SendMessageRequest,
-    SendMessageResponse,
-    Task,
-    TaskStatus,
-    TextPart,
-)
 
 logger = logging.getLogger(__name__)
 
+# v1.0 protocol version context — required by DefaultRequestHandlerV2's validate_version decorator
+_V1_CONTEXT = ClientCallContext(service_parameters={VERSION_HEADER: PROTOCOL_VERSION_1_0})
+
 
 class A2AClient:
-    """Typed HTTP client implementing the Google A2A protocol."""
+    """A2A client using the official SDK create_client + minimal_agent_card."""
 
     def __init__(self, agent_url: str) -> None:
         self.agent_url = agent_url.rstrip("/")
 
-    # ── Discovery & health ────────────────────────────────────────────────────
-
     async def get_agent_card(self) -> AgentCard:
-        """Fetch the AgentCard — agent discovery step."""
-        async with httpx.AsyncClient(timeout=CARD_TIMEOUT) as client:
-            resp = await client.get(f"{self.agent_url}/.well-known/agent.json")
-            resp.raise_for_status()
-            return AgentCard(**resp.json())
+        """Fetch and return the SDK AgentCard from /.well-known/agent.json."""
+        async with httpx.AsyncClient(timeout=CARD_TIMEOUT) as http:
+            resolver = A2ACardResolver(http, self.agent_url)
+            return await resolver.get_agent_card()
 
     async def health_check(self) -> bool:
         """Return True if the agent is reachable and healthy."""
         try:
-            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
-                resp = await client.get(f"{self.agent_url}/health")
+            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as http:
+                resp = await http.get(f"{self.agent_url}/health")
                 return resp.status_code == 200
         except Exception:
             return False
-
-
-    # ── Task submission ───────────────────────────────────────────────────────
 
     async def send_message(
         self,
@@ -64,53 +62,55 @@ class A2AClient:
         data: dict | None = None,
         session_id: str | None = None,
     ) -> dict:
-        """
-        Send a message/send JSON-RPC request to the agent.
-
-        Builds a Message with a TextPart (human-readable task) and an optional
-        DataPart (structured input payload). Returns the DataPart from the first
-        artifact in the completed Task.
-        """
-        parts: list = [TextPart(text=text)]
+        """Send a message and return the DataPart result dict."""
+        parts: list[Part] = [Part(text=text)]
         if data:
-            parts.append(DataPart(data=data))
+            value = struct_pb2.Value()
+            json_format.ParseDict(data, value)
+            parts.append(Part(data=value))
 
         request = SendMessageRequest(
-            id=str(uuid.uuid4()),
-            params=MessageSendParams(
-                message=Message(role="user", parts=parts),
-                session_id=session_id,
-            ),
+            message=Message(
+                message_id=str(uuid.uuid4()),
+                context_id=session_id or str(uuid.uuid4()),
+                role=Role.ROLE_USER,
+                parts=parts,
+            )
         )
 
         logger.info("A2A → %s  %s", self.agent_url, text[:80])
 
-        async with httpx.AsyncClient(timeout=SEND_TIMEOUT) as client:
-            resp = await client.post(
-                f"{self.agent_url}/send_message",
-                json=request.model_dump(mode="json"),
-            )
-            resp.raise_for_status()
+        config = ClientConfig(
+            httpx_client=httpx.AsyncClient(timeout=SEND_TIMEOUT),
+            streaming=False,
+        )
+        sdk_client = await create_client(
+            minimal_agent_card(url=self.agent_url, transports=[TransportProtocol.JSONRPC]),
+            client_config=config,
+        )
 
-        response = SendMessageResponse(**resp.json())
+        task = None
+        async for stream_response in sdk_client.send_message(request, context=_V1_CONTEXT):
+            if stream_response.HasField("task"):
+                task = stream_response.task
 
-        if response.error:
-            raise RuntimeError(f"A2A agent error from {self.agent_url}: {response.error}")
+        if task is None:
+            raise RuntimeError(f"No task in response from {self.agent_url}")
 
-        task: Task = response.result
-        if task.status == TaskStatus.FAILED:
-            raise RuntimeError(f"A2A task {task.id} failed: {task.error}")
-
-        # Extract the DataPart from the first artifact
         result = _extract_data(task)
         logger.info("A2A ← %s  task %s completed", self.agent_url, task.id)
         return result
 
 
-def _extract_data(task: Task) -> dict:
-    """Pull the DataPart payload out of a completed Task's first artifact."""
+def _extract_data(task) -> dict:
+    """Pull the data payload from the first artifact of a completed Task."""
     for artifact in task.artifacts:
         for part in artifact.parts:
-            if isinstance(part, DataPart):
-                return part.data
-    raise RuntimeError(f"Task {task.id} returned no DataPart artifact")
+            try:
+                if part.HasField("data"):
+                    raw = json_format.MessageToDict(part.data)
+                    if isinstance(raw, dict):
+                        return raw
+            except ValueError:
+                pass
+    raise RuntimeError(f"Task {task.id} returned no data artifact")

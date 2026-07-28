@@ -9,6 +9,7 @@ Ports:
   8002 — Attractions Agent (LangGraph)
   8003 — Hotel Agent       (CrewAI)
   8004 — Transport Agent   (CrewAI)
+Coordinator: Google ADK (LlmAgent routing) + A2A orchestration
 
 Protocol endpoints on every agent:
   GET  /.well-known/agent.json  — AgentCard discovery

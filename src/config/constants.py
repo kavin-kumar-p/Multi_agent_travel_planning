@@ -17,6 +17,9 @@ ATTRACTIONS_URL = f"http://{AGENT_HOST}:{ATTRACTIONS_PORT}"
 HOTEL_URL       = f"http://{AGENT_HOST}:{HOTEL_PORT}"
 TRANSPORT_URL   = f"http://{AGENT_HOST}:{TRANSPORT_PORT}"
 
+# All agent URLs — used by AgentRegistry for dynamic peer discovery
+ALL_AGENT_URLS: list[str] = [FLIGHT_URL, ATTRACTIONS_URL, HOTEL_URL, TRANSPORT_URL]
+
 # ── HTTP timeouts (seconds) ───────────────────────────────────────────────────
 
 SEND_TIMEOUT   = 600.0   # agent tasks can take up to 10 min
@@ -40,4 +43,10 @@ DEFAULT_BUDGET_SPLIT: dict[str, float] = {
 
 BUDGET_HOTEL_BUFFER = 1.20   # search hotels up to 20 % above per-night cap
 RETRY_CAP_FACTOR    = 0.85   # tighten flight cap by 15 % on each budget retry
-NIGHT_FALLBACK      = 5      # default nights when date parsing fails
+
+# ── Rate-limit retry (CrewAI agents) ─────────────────────────────────────────
+
+RATE_LIMIT_MAX_ATTEMPTS  = 6    # total attempts (1 initial + 5 retries)
+RATE_LIMIT_MAX_RETRIES   = 5    # retries after first failure (ATTEMPTS - 1)
+RATE_LIMIT_BASE_WAIT     = 30   # seconds for first retry when no header found
+RATE_LIMIT_BACKOFF_BASE  = 2    # exponential base: wait = BASE_WAIT * BACKOFF_BASE ** attempt

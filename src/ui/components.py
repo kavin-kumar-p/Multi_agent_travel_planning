@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import streamlit as st
+from src.ui.log_buffer import get_lines as _get_log_lines
 
 _AGENT_LABELS = {
-    "flights":      "Flight Agent (LangGraph)",
-    "attractions":  "Attractions Agent (LangGraph)",
-    "hotel":        "Hotel Agent (CrewAI)",
-    "transport":    "Transport Agent (CrewAI)",
-    "coordinator":  "Coordinator (Google ADK)",
+    "flights":      "Flight Agent — LangGraph",
+    "attractions":  "Attractions Agent — LangGraph",
+    "hotel":        "Hotel Agent — CrewAI",
+    "transport":    "Transport Agent — CrewAI",
+    "coordinator":  "Coordinator — Google ADK",
 }
 
 _STATUS_LABELS = {
@@ -105,6 +106,13 @@ def render_traces() -> None:
             st.info(
                 f"Currently running: **{_AGENT_LABELS.get(running[-1]['agent'], running[-1]['agent'])}**"
             )
+
+    # ── Raw log panel ─────────────────────────────────────────────────────────
+    log_lines = _get_log_lines()
+    if log_lines:
+        st.markdown("---")
+        with st.expander("Raw Logs", expanded=(stage == "planning")):
+            st.code("\n".join(log_lines), language="text")
 
 
 def render_session() -> None:

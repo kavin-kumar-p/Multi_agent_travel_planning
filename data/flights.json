@@ -78,5 +78,65 @@
     "price": 760,
     "layovers": 0,
     "duration_hours": 10.5
+  },
+  {
+    "flight_id": "R1",
+    "origin": "CDG",
+    "destination": "JFK",
+    "airline": "Air France",
+    "class": "economy",
+    "price": 610,
+    "layovers": 0,
+    "duration_hours": 8.0
+  },
+  {
+    "flight_id": "R2",
+    "origin": "CDG",
+    "destination": "JFK",
+    "airline": "United",
+    "class": "economy",
+    "price": 530,
+    "layovers": 1,
+    "duration_hours": 11.5
+  },
+  {
+    "flight_id": "R3",
+    "origin": "NRT",
+    "destination": "JFK",
+    "airline": "ANA",
+    "class": "economy",
+    "price": 780,
+    "layovers": 1,
+    "duration_hours": 15.0
+  },
+  {
+    "flight_id": "R4",
+    "origin": "NRT",
+    "destination": "LAX",
+    "airline": "JAL",
+    "class": "economy",
+    "price": 870,
+    "layovers": 0,
+    "duration_hours": 11.0
+  },
+  {
+    "flight_id": "R5",
+    "origin": "NRT",
+    "destination": "SFO",
+    "airline": "United",
+    "class": "economy",
+    "price": 740,
+    "layovers": 0,
+    "duration_hours": 10.0
+  },
+  {
+    "flight_id": "R6",
+    "origin": "CDG",
+    "destination": "ORD",
+    "airline": "American",
+    "class": "economy",
+    "price": 570,
+    "layovers": 1,
+    "duration_hours": 10.5
   }
 ]

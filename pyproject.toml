@@ -24,6 +24,9 @@ dependencies = [
     "faiss-cpu>=1.8.0",
     "langchain-text-splitters>=0.3.0",
 
+    # A2A protocol (official SDK — protobuf-based v1.1+)
+    "a2a-sdk>=1.1.2",
+
     # MCP (Model Context Protocol)
     "mcp>=1.0.0",
 
